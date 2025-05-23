@@ -14,6 +14,7 @@ sys.path.insert(0, PROJECT_ROOT_DIR)
 from examples.quick_start_example import main as quick_start_main
 from examples.min_batch_size_example import main as min_batch_size_example_main
 from examples.side_inputs_example import main_with_side_inputs
+from examples.error_handling_readme_example import main_error_handling
 
 @pytest.mark.asyncio
 async def test_quick_start_example():
@@ -50,4 +51,25 @@ async def test_side_inputs_example():
 
     # Expected for AsyncStream: [(1*2 + 50)*2, (2*2 + 50)*2] = [104, 108]
     assert all_results["stream"] == [104, 108]
+
+@pytest.mark.asyncio
+async def test_error_handling_readme_example():
+    """Test the error_handling_readme_example.py outputs."""
+    all_results = await main_error_handling()
+    
+    # Results are non-deterministic due to random failures, but we can test structure
+    assert "skip_items" in all_results
+    assert "retry" in all_results  
+    assert "custom_handler" in all_results
+    
+    # skip_items: Should have some results (negative batches are skipped)
+    # The exact results depend on random failures, but should be a list
+    assert isinstance(all_results["skip_items"], list)
+    
+    # retry: Should have some results after retries
+    assert isinstance(all_results["retry"], list)
+    
+    # custom_handler: Should have results with -1 for multiples of 7
+    # Input [1, 2, 7, 14, 21] -> [5, 10, -1, -1, -1] (business rule violations become -1)
+    assert all_results["custom_handler"] == [5, 10, -1, -1, -1]
 

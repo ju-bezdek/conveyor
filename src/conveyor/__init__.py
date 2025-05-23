@@ -8,6 +8,7 @@ from .stream import AsyncStream
 from .tasks import BaseTask, SingleTask, BatchTask
 from .pipeline import Pipeline
 from .decorators import single_task, batch_task
+from .error_handling import ErrorAction, RetryConfig, ErrorHandler, LoggingErrorHandler
 
 # Example usage (optional, can be moved to an examples folder or documentation)
 @single_task
@@ -55,6 +56,10 @@ __all__ = [
     "Pipeline",
     "single_task",
     "batch_task",
+    "ErrorAction",
+    "RetryConfig", 
+    "ErrorHandler",
+    "LoggingErrorHandler",
     "example_main" # Exposing example_main if it's intended to be runnable directly
 ]
 

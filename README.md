@@ -7,6 +7,7 @@ A Python library for streamlining asynchronous streaming tasks and pipelines.
 - Define atomic tasks that process single items or batches of items.
 - Chain tasks together to create powerful asynchronous pipelines.
 - Flexible output handling: consume results as an async stream or collect them all at once.
+- **Robust error handling**: Configure retry logic and error recovery strategies at the task level.
 - Designed for extensibility.
 
 ## Installation
@@ -386,4 +387,113 @@ graph TD
     FB -- "batch [7.0]" --> R2((7.0))
     R1 --> FR[Final Results]
     R2 --> FR
+```
+
+## Error Handling
+
+Conveyor provides comprehensive error handling capabilities that can be configured directly in task decorators. You can control retry behavior and specify what should happen when errors occur.
+
+### Error Handling Options
+
+- **`on_error`**: What to do when an error occurs after all retry attempts
+  - `"fail"` (default): Raise the error and stop the pipeline
+  - `"skip_item"`: Skip the failing item and continue processing
+  - `"skip_batch"`: For batch tasks, skip the entire batch if any item fails
+
+- **Retry Configuration**: Independent retry logic with exponential backoff
+  - `retry_attempts`: Number of retry attempts (default: 1, no retry)
+  - `retry_delay`: Base delay between retries in seconds
+  - `retry_exponential_backoff`: Whether to use exponential backoff (default: True)
+  - `retry_max_delay`: Maximum delay between retries
+
+- **Custom Error Handlers**: For complex error handling scenarios
+
+### Basic Error Handling Example
+
+```python
+import asyncio
+import random
+from conveyor import single_task, batch_task, ErrorHandler
+
+# Task that skips failing items
+@single_task(on_error="skip_item")
+async def unreliable_task(x: int) -> int:
+    await asyncio.sleep(0.01)
+    if random.random() < 0.3:  # 30% failure rate
+        raise ValueError(f"Random failure processing {x}")
+    return x * 2
+
+# Task with retry logic
+@single_task(
+    retry_attempts=3,
+    retry_delay=0.1,
+    retry_exponential_backoff=True,
+    on_error="skip_item"
+)
+async def task_with_retry(x: int) -> int:
+    if random.random() < 0.5:  # 50% failure rate
+        raise ValueError(f"Temporary failure processing {x}")
+    return x + 100
+
+# Batch task that skips entire batch on any failure
+@batch_task(max_size=3, on_error="skip_batch")
+async def sensitive_batch_task(batch: list[int]) -> int:
+    if any(x < 0 for x in batch):
+        raise ValueError("Negative numbers not allowed in batch")
+    return sum(batch)
+
+# Custom error handler for business logic
+class BusinessErrorHandler(ErrorHandler):
+    async def handle_error(self, error: Exception, item, task_name: str, attempt: int) -> tuple[bool, any]:
+        if isinstance(error, ValueError) and "business rule" in str(error):
+            print(f"Business rule violation in {task_name}: {error}")
+            return True, -1  # Continue with sentinel value
+        return False, None  # Re-raise other errors
+
+@single_task(error_handler=BusinessErrorHandler())
+async def business_task(x: int) -> int:
+    if x % 7 == 0:
+        raise ValueError("business rule: multiples of 7 not allowed")
+    return x * 5
+
+async def main_error_handling():
+    data = [1, 2, -1, 3, 4, 5, 6, 7, 8]
+    
+    print("1. Skip failing items:")
+    pipeline1 = unreliable_task | sensitive_batch_task
+    results1 = await pipeline1(data).collect()
+    print(f"Results: {results1}")
+    
+    print("\n2. Retry with backoff:")
+    pipeline2 = task_with_retry
+    results2 = await pipeline2([1, 2, 3]).collect()
+    print(f"Results: {results2}")
+    
+    print("\n3. Custom error handler:")
+    pipeline3 = business_task
+    results3 = await pipeline3([1, 2, 7, 14, 21]).collect()
+    print(f"Results: {results3}")
+
+if __name__ == "__main__":
+    asyncio.run(main_error_handling())
+```
+
+**Error Handling Flow (Mermaid):**
+
+```mermaid
+graph TD
+    A[Task Execution] --> B{Error Occurs?}
+    B -->|No| C[Return Result]
+    B -->|Yes| D{Retry Attempts Left?}
+    D -->|Yes| E[Wait with Backoff]
+    E --> A
+    D -->|No| F{Custom Handler?}
+    F -->|Yes| G[Custom Handler Logic]
+    F -->|No| H{on_error Setting}
+    G --> I{Handler Says Continue?}
+    I -->|Yes| J[Use Handler Value]
+    I -->|No| K[Raise Error]
+    H -->|fail| K
+    H -->|skip_item| L[Skip Item]
+    H -->|skip_batch| M[Skip Batch]
 ```
