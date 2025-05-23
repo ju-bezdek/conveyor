@@ -22,12 +22,11 @@ class Pipeline:
     def __call__(self, data: Iterable[T]) -> AsyncStream[T]:
         return AsyncStream(self._run_pipeline(data))
 
-    def _run_pipeline(self, data: Iterable[T]) -> AsyncIterable[T]: # Removed async
+    def _run_pipeline(self, data: Iterable[T]) -> AsyncIterable[T]:
         async def gen():
             current_stream: AsyncIterable[Any] = self._make_input_async(data)
             for stage in self.stages:
-                # The process method in BaseTask and its subclasses is an async def method.
-                # Calling it returns a coroutine. Await it to get the AsyncIterable.
+                # The process method is async and returns an AsyncIterable
                 current_stream = await stage.process(current_stream)
             async for item in current_stream:
                 yield item
@@ -35,8 +34,15 @@ class Pipeline:
 
     def _make_input_async(self, data: Iterable[T]) -> AsyncIterable[T]:
         async def _gen():
-            for item in data:
-                yield item
+            if isinstance(data, AsyncIterable):
+                # If the input data is already an AsyncIterable, return it directly
+                async for item in data:
+                    yield item
+            elif isinstance(data, list):
+                for item in data:
+                    yield item
+            else:
+                yield data
         return _gen()
 
 __all__ = ["Pipeline"]

@@ -1,4 +1,5 @@
 from typing import Callable, Iterable, List, Optional, TypeVar, Union
+import functools
 from .tasks import SingleTask, BatchTask
 from .error_handling import ErrorAction, RetryConfig, ErrorHandler
 
@@ -32,15 +33,24 @@ def single_task(func: Optional[Callable] = None,
             exponential_backoff=retry_exponential_backoff,
             max_delay=retry_max_delay
         ) if retry_attempts > 1 else None
-        
+
+        # Check if this is a method (will be bound when accessed on an instance)
+        if hasattr(f, "__self__"):
+            # Already bound method
+            task_func = f
+        else:
+            # Could be an unbound method or regular function
+            # We'll handle the binding at runtime
+            task_func = f
+
         return SingleTask(
-            f, 
+            task_func,
             on_error=on_error,
             retry_config=retry_config,
             error_handler=error_handler,
-            task_name=task_name or f.__name__
+            task_name=task_name or f.__name__,
         )
-    
+
     if func is None:
         return decorator
     else:
@@ -75,17 +85,26 @@ def batch_task(min_size: int = 1, max_size: Optional[int] = None,
             exponential_backoff=retry_exponential_backoff,
             max_delay=retry_max_delay
         ) if retry_attempts > 1 else None
-        
+
+        # Check if this is a method (will be bound when accessed on an instance)
+        if hasattr(func, "__self__"):
+            # Already bound method
+            task_func = func
+        else:
+            # Could be an unbound method or regular function
+            # We'll handle the binding at runtime
+            task_func = func
+
         return BatchTask(
-            func, 
-            min_size=min_size, 
+            task_func,
+            min_size=min_size,
             max_size=max_size,
             on_error=on_error,
             retry_config=retry_config,
             error_handler=error_handler,
-            task_name=task_name or func.__name__
+            task_name=task_name or func.__name__,
         )
-    
+
     return decorator
 
 __all__ = ["single_task", "batch_task"]
