@@ -16,6 +16,7 @@ from examples.min_batch_size_example import main as min_batch_size_example_main
 from examples.side_inputs_example import main_with_side_inputs
 from examples.error_handling_readme_example import main_error_handling
 from examples.split_and_process_example import main as split_and_process_main
+from examples.batch_item_generating import generate_batches_with_delay, process_batch, add_timestamp
 
 @pytest.mark.asyncio
 async def test_quick_start_example():
@@ -127,3 +128,62 @@ async def test_split_and_process_example():
         assert result["length"] == len(expected_lines[i])
         # Sleep duration should be length * 0.05
         assert abs(result["sleep_duration"] - (len(expected_lines[i]) * 0.05)) < 0.001
+
+@pytest.mark.asyncio
+async def test_batch_item_generating():
+    """Test the zero-input pipeline with batch processing example."""
+    # Create a pipeline starting with our source generator
+    from conveyor import Pipeline
+    
+    # Create a pipeline that starts with a source generator
+    pipeline = generate_batches_with_delay | process_batch | add_timestamp
+    
+    # Collect all results
+    all_results = []
+    batch_groups = {}
+    
+    # Execute the pipeline without providing any input data
+    # since our source generator doesn't require any
+    async for result in pipeline():
+        all_results.append(result)
+        
+        # Track which batch this item was processed in
+        batch_key = str(result["processed_with"])
+        if batch_key not in batch_groups:
+            batch_groups[batch_key] = []
+        batch_groups[batch_key].append(result["id"])
+    
+    # Verify we got all expected results
+    assert len(all_results) == 15, "Should have 15 total results (3 batches of 5 items)"
+    
+    # Verify that all items have the required metadata
+    for result in all_results:
+        assert "id" in result, "Each result should have an id"
+        assert "batch" in result, "Each result should have a batch number"
+        assert "processed" in result, "Each result should have processed flag"
+        assert "processed_with" in result, "Each result should track which items it was processed with"
+        assert "processed_at" in result, "Each result should have a processed timestamp"
+        assert "emerged_at" in result, "Each result should have an emerged timestamp"
+        assert "total_time" in result, "Each result should have total processing time"
+    
+    # Verify batch processing logic
+    assert len(batch_groups) >= 5, "Should have at least 5 processing batches with max_size=3"
+    
+    # Verify item order preservation and batch boundaries
+    # Items should be received in the original order, even when processed in different batches
+    ids = [result["id"] for result in all_results]
+    expected_ids = [
+        # First source batch (5 items)
+        0, 1, 2, 3, 4,
+        # Second source batch (5 items)
+        10, 11, 12, 13, 14,
+        # Third source batch (5 items)
+        20, 21, 22, 23, 24
+    ]
+    assert ids == expected_ids, "Results should preserve original order of items across batches"
+    
+    # Check timing patterns by comparing emergence times instead of processing times
+    # Items from later batches should emerge later than items from earlier batches
+    first_batch_emerged_at = all_results[0]["emerged_at"]
+    last_batch_emerged_at = all_results[-1]["emerged_at"]
+    assert last_batch_emerged_at > first_batch_emerged_at, "Later batches should emerge later due to source delays"

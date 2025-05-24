@@ -1,10 +1,14 @@
+from re import U
 from typing import Any, AsyncIterable, Iterable, List, TypeVar, Union, Optional
 from .stream import AsyncStream
-from .tasks import BaseTask
+from .tasks import BaseTask, UNDEFINED_VALUE
 from .context import PipelineContext, ContextManager, ExecutionMode
 import uuid
 
 T = TypeVar('T')
+
+
+# Used to represent undefined argument
 
 class Pipeline:
 
@@ -42,8 +46,18 @@ class Pipeline:
             return Pipeline(new_context).add(*self.stages, *other.stages)
         raise TypeError(f"Cannot pipe Pipeline to {type(other)}")
 
-    def __call__(self, data: Iterable[T]) -> AsyncStream[T]:
-        stream = AsyncStream(self._run_pipeline(data))
+    def __call__(
+        self, data: Iterable[T] = UNDEFINED_VALUE, *args, **kwargs
+    ) -> AsyncStream[T]:
+        if not (isinstance(data, Iterable) and not isinstance(data, (str, tuple))):
+            # if first argument is not an iterable we consider it as intial arg for first stage
+            if args:
+                args = (data, *args)
+            elif data != UNDEFINED_VALUE:
+                args = (data,)
+            data = UNDEFINED_VALUE
+
+        stream = AsyncStream(self._run_pipeline(data, *args, **kwargs))
         # The execution mode is handled through the context system in _run_pipeline
         # No need to call stream.as_completed() here
         return stream
@@ -63,7 +77,9 @@ class Pipeline:
         async for item in as_completed_pipeline(data):
             yield item
 
-    def _run_pipeline(self, data: Iterable[T]) -> AsyncIterable[T]:
+    def _run_pipeline(
+        self, data: Iterable[T] = UNDEFINED_VALUE, *args, **kwargs
+    ) -> AsyncIterable[T]:
         async def gen():
             # Set up context for this pipeline execution
             execution_context = self.context.copy()
@@ -76,6 +92,12 @@ class Pipeline:
                 for stage_index, stage in enumerate(self.stages):
                     # Update context for current stage
                     execution_context.current_stage = stage_index
+                    if stage_index == 0 and (args or kwargs):
+                        # If there are kwargs, pass them to the first stage
+                        if args:
+                            stage._side_args = args  # args provided in pipeline call override any side_args defined in the stage
+                        if kwargs:
+                            stage._side_kwargs.update(**kwargs)
 
                     # The process method is async and returns an AsyncIterable
                     # Pass the context explicitly to ensure it's available in all task executions
@@ -85,7 +107,9 @@ class Pipeline:
                     yield item
         return gen()
 
-    def _make_input_async(self, data: Iterable[T]) -> AsyncIterable[T]:
+    def _make_input_async(
+        self, data: Iterable[T] = UNDEFINED_VALUE
+    ) -> AsyncIterable[T]:
         async def _gen():
             if isinstance(data, AsyncIterable):
                 # If the input data is already an AsyncIterable, return it directly
@@ -97,5 +121,6 @@ class Pipeline:
             else:
                 yield data
         return _gen()
+
 
 __all__ = ["Pipeline"]

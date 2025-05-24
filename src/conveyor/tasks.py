@@ -14,6 +14,8 @@ from .context import get_current_context, PipelineContext
 
 T = TypeVar('T')
 
+UNDEFINED_VALUE = object()
+
 class BaseTask:
     def __init__(self, 
                  on_error: ErrorAction = "fail",
@@ -24,6 +26,8 @@ class BaseTask:
         self.retry_config = retry_config or RetryConfig(max_attempts=1)  # No retry by default
         self.error_handler = error_handler
         self.task_name = task_name or self.__class__.__name__
+        self._side_args = []
+        self._side_kwargs = {}
 
     async def process(self, items: AsyncIterable[T]) -> AsyncIterable[T]:
         raise NotImplementedError
@@ -226,7 +230,10 @@ class SingleTask(BaseTask):
 
             async def _execute_item(index_and_item):
                 index, item_to_process = index_and_item
-
+                if item_to_process != UNDEFINED_VALUE:
+                    _args = (item_to_process, *resolved_args)
+                else:
+                    _args = resolved_args
                 async def _execute():
                     # Handle bound methods properly
                     if self._instance is not None:
@@ -235,22 +242,19 @@ class SingleTask(BaseTask):
                             # Handle async generator functions - return the generator itself
                             return self.func(
                                 self._instance,
-                                item_to_process,
-                                *resolved_args,
+                                *_args,
                                 **resolved_kwargs,
                             )
                         elif asyncio.iscoroutinefunction(self.func):
                             return await self.func(
                                 self._instance,
-                                item_to_process,
-                                *resolved_args,
+                                *_args,
                                 **resolved_kwargs,
                             )
                         else:
                             result = self.func(
                                 self._instance,
-                                item_to_process,
-                                *resolved_args,
+                                *_args,
                                 **resolved_kwargs,
                             )
                             # Handle regular generator functions
@@ -261,17 +265,11 @@ class SingleTask(BaseTask):
                         # Regular function or already bound method
                         if inspect.isasyncgenfunction(self.func):
                             # Handle async generator functions - return the generator itself
-                            return self.func(
-                                item_to_process, *resolved_args, **resolved_kwargs
-                            )
+                            return self.func(*_args, **resolved_kwargs)
                         elif asyncio.iscoroutinefunction(self.func):
-                            return await self.func(
-                                item_to_process, *resolved_args, **resolved_kwargs
-                            )
+                            return await self.func(*_args, **resolved_kwargs)
                         else:
-                            result = self.func(
-                                item_to_process, *resolved_args, **resolved_kwargs
-                            )
+                            result = self.func(*_args, **resolved_kwargs)
                             # Handle regular generator functions
                             if inspect.isgeneratorfunction(self.func):
                                 return result  # Return the generator itself
@@ -361,6 +359,10 @@ class SingleTask(BaseTask):
                     item_to_process=item,
                 ):  # Capture item in closure
                     async def _execute():
+                        if item_to_process != UNDEFINED_VALUE:
+                            _args = (item_to_process, *resolved_args)
+                        else:
+                            _args = resolved_args
                         # Handle bound methods properly
                         if self._instance is not None:
                             # This is a bound method, call with instance
@@ -368,22 +370,19 @@ class SingleTask(BaseTask):
                                 # Handle async generator functions - return the generator itself
                                 return self.func(
                                     self._instance,
-                                    item_to_process,
-                                    *resolved_args,
+                                    *_args,
                                     **resolved_kwargs,
                                 )
                             elif asyncio.iscoroutinefunction(self.func):
                                 return await self.func(
                                     self._instance,
-                                    item_to_process,
-                                    *resolved_args,
+                                    *_args,
                                     **resolved_kwargs,
                                 )
                             else:
                                 result = self.func(
                                     self._instance,
-                                    item_to_process,
-                                    *resolved_args,
+                                    *_args,
                                     **resolved_kwargs,
                                 )
                                 # Handle regular generator functions
@@ -394,17 +393,11 @@ class SingleTask(BaseTask):
                             # Regular function or already bound method
                             if inspect.isasyncgenfunction(self.func):
                                 # Handle async generator functions - return the generator itself
-                                return self.func(
-                                    item_to_process, *resolved_args, **resolved_kwargs
-                                )
+                                return self.func(*_args, **resolved_kwargs)
                             elif asyncio.iscoroutinefunction(self.func):
-                                return await self.func(
-                                    item_to_process, *resolved_args, **resolved_kwargs
-                                )
+                                return await self.func(*_args, **resolved_kwargs)
                             else:
-                                result = self.func(
-                                    item_to_process, *resolved_args, **resolved_kwargs
-                                )
+                                result = self.func(*_args, **resolved_kwargs)
                                 # Handle regular generator functions
                                 if inspect.isgeneratorfunction(self.func):
                                     return result  # Return the generator itself
