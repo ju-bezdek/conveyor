@@ -1,6 +1,8 @@
 import asyncio
 import inspect
 from typing import Any, AsyncIterable, Callable, Iterable, List, Optional, TypeVar, Union
+from contextvars import copy_context
+
 # Forward declaration for type hinting to avoid circular import
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -8,6 +10,7 @@ if TYPE_CHECKING:
     from .stream import AsyncStream # Added for type hint
 
 from .error_handling import ErrorAction, RetryConfig, ErrorHandler
+from .context import get_current_context, PipelineContext
 
 T = TypeVar('T')
 
@@ -24,6 +27,10 @@ class BaseTask:
 
     async def process(self, items: AsyncIterable[T]) -> AsyncIterable[T]:
         raise NotImplementedError
+
+    def get_context(self) -> Optional[PipelineContext]:
+        """Get the current pipeline context."""
+        return get_current_context()
 
     def __or__(self, other: Union['BaseTask', 'Pipeline']) -> 'Pipeline':
         from .pipeline import Pipeline as PipelineClass  # Local import to avoid circular dependency
@@ -44,31 +51,39 @@ class BaseTask:
         pipeline = PipelineClass().add(self)
         return pipeline(data)
 
+    async def as_completed(self, data):
+        """Execute the task and yield results as they complete, similar to asyncio.as_completed()."""
+        from .pipeline import Pipeline as PipelineClass
+
+        pipeline = PipelineClass().add(self)
+        async for item in pipeline.as_completed(data):
+            yield item
+
     async def _execute_with_error_handling(self, func_call: Callable, item: Any, batch: Optional[List[Any]] = None):
         """Execute a function call with error handling and retry logic."""
         last_error = None
-        
+
         for attempt in range(1, self.retry_config.max_attempts + 1):
             try:
                 return await func_call()
             except Exception as error:
                 last_error = error
-                
+
                 # If we have more attempts, calculate delay and continue
                 if attempt < self.retry_config.max_attempts:
                     delay = self._calculate_retry_delay(attempt)
                     await asyncio.sleep(delay)
                     continue
-                
+
                 # Last attempt failed, handle the error
                 return await self._handle_final_error(error, item, batch, attempt)
-        
+
         # Should never reach here, but just in case
         raise last_error
 
     async def _handle_final_error(self, error: Exception, item: Any, batch: Optional[List[Any]], attempt: int):
         """Handle error after all retry attempts are exhausted."""
-        
+
         # Custom error handler takes precedence
         if self.error_handler:
             should_continue, value = await self.error_handler.handle_error(error, item, self.task_name, attempt)
@@ -76,7 +91,7 @@ class BaseTask:
                 return value
             else:
                 raise error
-        
+
         # Built-in error actions
         if self.on_error == "fail":
             raise error
@@ -91,7 +106,7 @@ class BaseTask:
         """Calculate delay for retry attempt."""
         if not self.retry_config.exponential_backoff:
             return self.retry_config.base_delay
-        
+
         delay = self.retry_config.base_delay * (
             self.retry_config.backoff_multiplier ** (attempt - 1)
         )
@@ -163,7 +178,30 @@ class SingleTask(BaseTask):
 
         current_resolved_args, current_resolved_kwargs = self._resolved_side_values
 
+        # Check execution mode from context
+        context = self.get_context()
+        execution_mode = context.execution_mode if context else "ordered"
+
+        if execution_mode == "as_completed":
+            return await self._process_as_completed(
+                items, current_resolved_args, current_resolved_kwargs
+            )
+        else:
+            return await self._process_ordered(
+                items, current_resolved_args, current_resolved_kwargs
+            )
+
+    async def _process_ordered(
+        self,
+        items: AsyncIterable[T],
+        resolved_args: List[Any],
+        resolved_kwargs: dict[str, Any],
+    ) -> AsyncIterable[Any]:
+        """Process items preserving order (current behavior)."""
         async def _gen():
+            # Get the current context to propagate to tasks
+            current_context = self.get_context()
+
             # Collect all items first with their order index
             items_with_index = []
             index = 0
@@ -172,8 +210,11 @@ class SingleTask(BaseTask):
                 index += 1
 
             # Create tasks for concurrent processing
+            ctx = copy_context()
+
             async def _execute_item(index_and_item):
                 index, item_to_process = index_and_item
+
                 async def _execute():
                     # Handle bound methods properly
                     if self._instance is not None:
@@ -183,22 +224,22 @@ class SingleTask(BaseTask):
                             return self.func(
                                 self._instance,
                                 item_to_process,
-                                *current_resolved_args,
-                                **current_resolved_kwargs,
+                                *resolved_args,
+                                **resolved_kwargs,
                             )
                         elif asyncio.iscoroutinefunction(self.func):
                             return await self.func(
                                 self._instance,
                                 item_to_process,
-                                *current_resolved_args,
-                                **current_resolved_kwargs,
+                                *resolved_args,
+                                **resolved_kwargs,
                             )
                         else:
                             result = self.func(
                                 self._instance,
                                 item_to_process,
-                                *current_resolved_args,
-                                **current_resolved_kwargs,
+                                *resolved_args,
+                                **resolved_kwargs,
                             )
                             # Handle regular generator functions
                             if inspect.isgeneratorfunction(self.func):
@@ -209,15 +250,15 @@ class SingleTask(BaseTask):
                         if inspect.isasyncgenfunction(self.func):
                             # Handle async generator functions - return the generator itself
                             return self.func(
-                                item_to_process, *current_resolved_args, **current_resolved_kwargs
+                                item_to_process, *resolved_args, **resolved_kwargs
                             )
                         elif asyncio.iscoroutinefunction(self.func):
                             return await self.func(
-                                item_to_process, *current_resolved_args, **current_resolved_kwargs
+                                item_to_process, *resolved_args, **resolved_kwargs
                             )
                         else:
                             result = self.func(
-                                item_to_process, *current_resolved_args, **current_resolved_kwargs
+                                item_to_process, *resolved_args, **resolved_kwargs
                             )
                             # Handle regular generator functions
                             if inspect.isgeneratorfunction(self.func):
@@ -227,8 +268,15 @@ class SingleTask(BaseTask):
                 result = await self._execute_with_error_handling(_execute, item_to_process)
                 return (index, result)
 
-            # Process all items concurrently but maintain order
-            tasks = [asyncio.create_task(_execute_item(item_with_index)) for item_with_index in items_with_index]
+            # Process all items concurrently but maintain order - use context.run to propagate context
+            tasks = [
+                ctx.run(
+                    lambda item=item_with_index: asyncio.create_task(
+                        _execute_item(item)
+                    )
+                )
+                for item_with_index in items_with_index
+            ]
             results = await asyncio.gather(*tasks)
 
             # Sort results by original order and yield them
@@ -252,6 +300,117 @@ class SingleTask(BaseTask):
                 else:
                     yield result
         return _gen()
+
+    async def _process_as_completed(
+        self,
+        items: AsyncIterable[T],
+        resolved_args: List[Any],
+        resolved_kwargs: dict[str, Any],
+    ) -> AsyncIterable[Any]:
+        """Process items yielding results as they complete."""
+
+        async def _gen():
+            # Collect all items and create tasks
+            tasks = []
+            items_list = []
+            async for item in items:
+                items_list.append(item)
+
+            # Create tasks for all items
+            for item in items_list:
+
+                async def _execute_item(
+                    item_to_process=item,
+                ):  # Capture item in closure
+                    async def _execute():
+                        # Handle bound methods properly
+                        if self._instance is not None:
+                            # This is a bound method, call with instance
+                            if inspect.isasyncgenfunction(self.func):
+                                # Handle async generator functions - return the generator itself
+                                return self.func(
+                                    self._instance,
+                                    item_to_process,
+                                    *resolved_args,
+                                    **resolved_kwargs,
+                                )
+                            elif asyncio.iscoroutinefunction(self.func):
+                                return await self.func(
+                                    self._instance,
+                                    item_to_process,
+                                    *resolved_args,
+                                    **resolved_kwargs,
+                                )
+                            else:
+                                result = self.func(
+                                    self._instance,
+                                    item_to_process,
+                                    *resolved_args,
+                                    **resolved_kwargs,
+                                )
+                                # Handle regular generator functions
+                                if inspect.isgeneratorfunction(self.func):
+                                    return result  # Return the generator itself
+                                return result
+                        else:
+                            # Regular function or already bound method
+                            if inspect.isasyncgenfunction(self.func):
+                                # Handle async generator functions - return the generator itself
+                                return self.func(
+                                    item_to_process, *resolved_args, **resolved_kwargs
+                                )
+                            elif asyncio.iscoroutinefunction(self.func):
+                                return await self.func(
+                                    item_to_process, *resolved_args, **resolved_kwargs
+                                )
+                            else:
+                                result = self.func(
+                                    item_to_process, *resolved_args, **resolved_kwargs
+                                )
+                                # Handle regular generator functions
+                                if inspect.isgeneratorfunction(self.func):
+                                    return result  # Return the generator itself
+                                return result
+
+                    try:
+                        result = await self._execute_with_error_handling(
+                            _execute, item_to_process
+                        )
+                        return result
+                    except Exception:
+                        # Skip failed items in as_completed mode
+                        return None
+
+                task = asyncio.create_task(_execute_item())
+                tasks.append(task)
+
+            # Yield results as they complete
+            for completed_task in asyncio.as_completed(tasks):
+                try:
+                    result = await completed_task
+                    if result is None:
+                        continue  # Skip this item
+
+                    # Check if result is an async generator (from async generator function)
+                    if inspect.isasyncgen(result):
+                        async for out in result:
+                            yield out
+                    # Check if result is a regular generator (from generator function)
+                    elif inspect.isgenerator(result):
+                        for out in result:
+                            yield out
+                    # Check if result is iterable but not string/bytes
+                    elif isinstance(result, list):
+                        for out in result:
+                            yield out
+                    else:
+                        yield result
+                except Exception:
+                    # Skip failed tasks - error handling should be done at task level
+                    continue
+
+        return _gen()
+
 
 class BatchTask(BaseTask):
     def __init__(self, func: Callable[..., Union[Iterable[Any], Any, None]],
