@@ -89,20 +89,20 @@ if __name__ == "__main__":
 
 ## Stream Processing vs. Collecting Results
 
-Conveyor offers two main approaches to consuming pipeline results, depending on your specific use case:
+Conveyor offers three main approaches to consuming pipeline results, depending on your specific use case:
 
-### Option 1: Processing the Stream
+### Option 1A: Ordered Streaming (Default)
 
-Use async iteration when you want to handle results as they become available:
+Use async iteration when you want to handle results as they become available while preserving the original input order:
 
 ```python
-# Process results as soon as they're available
+# Process results as they're available, in original input order
 async for result in pipeline(data_source):
-    print(f"Got a result: {result}")
+    print(f"Got a result in original order: {result}")
     # Process each result immediately
 ```
 
-**🚀 Streaming Performance Benefits:**
+**🚀 Ordered Streaming Performance Benefits:**
 
 Conveyor's ordered processing uses an **ordered queue approach** that enables true streaming while preserving order:
 
@@ -134,6 +134,32 @@ Benefits: 🎯 First 5 results available 75% faster!
 - Once outliers complete, buffered results yield immediately
 - **Never performs worse** than traditional batch processing
 
+### Option 1B: Unordered Streaming (as_completed)
+
+When you care about processing results as soon as possible, regardless of their original order:
+
+```python
+# Process results in the order they complete, ignoring original input order
+async for result in pipeline.as_completed(data_source):
+    print(f"Got a completed result (fastest first): {result}")
+    # Process results in completion order
+```
+
+Alternatively, you can create a stream with a specific execution mode:
+
+```python
+# Create a stream with as_completed execution mode
+stream = pipeline.with_execution_mode("as_completed")(data_source)
+async for result in stream:
+    print(f"Got result in completion order: {result}")
+```
+
+**⚡ Unordered Streaming Benefits:**
+- **Maximum responsiveness**: Get results immediately as they complete
+- **No blocking**: Fast results are never delayed by slow outliers
+- **Optimized for speed**: Ideal when result order doesn't matter
+- **Real-time processing**: Perfect for displaying immediate progress
+
 ### Option 2: Collecting All Results
 
 Use `collect()` when you need all results available at once:
@@ -142,28 +168,14 @@ Use `collect()` when you need all results available at once:
 # Wait for all results to be processed
 results = await pipeline(data_source).collect()
 print(f"All results are ready: {results}")
-```
-### Bonus 3: Processing Results in Batches
 
-For workloads that benefit from batch processing outputs, you can create a consumer that handles multiple results at once:
-
-```python
-# Create a batch processor for the output
-@batch_task(min_size=10)  # Will collect at least 10 items before processing
-async def process_results_in_bulk(results_batch: list):
-    print(f"Processing batch of {len(results_batch)} results together")
-    # Do batch processing work here
-    return processed_results
-
-# Connect it to your pipeline output
-output_processor = pipeline(data_source) | process_results_in_bulk
-
-# Now consume the batched results
-async for bulk_result in output_processor:
-    print(f"Processed batch result: {bulk_result}")
+# Or collect results in completion order
+results = await pipeline.as_completed(data_source).collect()
+print(f"All results collected in completion order: {results}")
 ```
 
-**Pipeline Flow Diagram (Mermaid):**
+
+**Pipeline Flow Diagram:**
 
 ```mermaid
 graph TD
@@ -192,7 +204,7 @@ graph TD
 
 When building pipelines, you might need to incorporate data from multiple sources. Conveyor Streaming offers two approaches:
 
-**Side Inputs Diagram (Mermaid):**
+**Side Inputs Diagram :**
 
 ```mermaid
 graph LR
@@ -409,7 +421,7 @@ if __name__ == "__main__":
     asyncio.run(main_multi_batch_pipeline())
 ```
 
-**Multi-Batch Pipeline Flow (Mermaid):**
+**Multi-Batch Pipeline Flow :**
 
 ```mermaid
 graph TD
@@ -521,7 +533,7 @@ if __name__ == "__main__":
     asyncio.run(main_error_handling())
 ```
 
-**Error Handling Flow (Mermaid):**
+**Error Handling Flow:**
 
 ```mermaid
 graph TD
