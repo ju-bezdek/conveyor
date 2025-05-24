@@ -1,31 +1,43 @@
 # Conveyor
 
-A Python library for streamlining asynchronous streaming tasks and pipelines.
+A Python library for efficient asynchronous pipeline processing with real-time streaming capabilities.
+
+This library implements ordered streaming of intermediate results between pipeline stages, allowing subsequent tasks to begin processing as soon as any individual item completes a stage, while still preserving original input ordering when needed.
+
+## Key Benefits
+
+- **Early Results Delivery**: Get initial results quickly without waiting for all items to finish processing
+- **Order Preservation**: Stream results in original order while maintaining maximum parallelism
+- **Optimal Resource Usage**: Process items concurrently through all pipeline stages
+- **Flexible Consumption**: Stream results as they're ready or collect them all at completion
+
+## Use Cases
+
+- **API Response Streaming**: Show initial results to users immediately while processing continues
+- **Batch Processing with Previews**: Process large datasets in batches but deliver completed batch results as they finish
+- **Long-Running Pipeline Visibility**: Monitor progress of multi-stage transformations in real-time
+- **Efficient Resource Management**: Maximize throughput for IO-bound workloads by ensuring all stages remain active
 
 ## Features
 
-- Define atomic tasks that process single items or batches of items.
-- Chain tasks together to create powerful asynchronous pipelines.
-- Flexible output handling: consume results as an async stream or collect them all at once.
-- **Robust error handling**: Configure retry logic and error recovery strategies at the task level.
-- Designed for extensibility.
+- Define atomic tasks that process single items or batches of items
+- Chain tasks together to create powerful asynchronous pipelines
+- Flexible output handling: consume results as an async stream or collect them all at once
+- Robust error handling: Configure retry logic and error recovery strategies at the task level
+- Designed for extensibility
 
 ## Installation
 
 ```bash
-# TODO: Add installation instructions once published
 pip install conveyor 
 ```
-(Currently, you can install it locally using Poetry)
-```bash
-poetry install
-```
+
 
 ## Quick Start
 
 ```python
 import asyncio
-from conveyor import single_task, batch_task, Pipeline
+from conveyor import single_task, batch_task
 
 # Define some tasks
 @single_task
