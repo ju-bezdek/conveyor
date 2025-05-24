@@ -125,6 +125,12 @@ class BaseTask:
             return await side_input
         return side_input
 
+    def __call__(self, data):
+        from .pipeline import Pipeline
+
+        return Pipeline().add(self)(data)
+
+
 class SingleTask(BaseTask):
     def __init__(self, func: Callable[..., Union[Iterable[Any], Any, None]], 
                  _side_args: Optional[List[Any]] = None, 
@@ -197,7 +203,7 @@ class SingleTask(BaseTask):
         resolved_args: List[Any],
         resolved_kwargs: dict[str, Any],
     ) -> AsyncIterable[Any]:
-        """Process items preserving order (current behavior)."""
+        """Process items preserving order while enabling streaming as soon as possible."""
         async def _gen():
             # Get the current context to propagate to tasks
             current_context = self.get_context()
@@ -209,8 +215,14 @@ class SingleTask(BaseTask):
                 items_with_index.append((index, item))
                 index += 1
 
+            if not items_with_index:
+                return  # No items to process
+
             # Create tasks for concurrent processing
             ctx = copy_context()
+            next_expected_index = 0
+            completed_buffer = {}  # {index: result}
+            pending_tasks = {}  # {index: task}
 
             async def _execute_item(index_and_item):
                 index, item_to_process = index_and_item
@@ -268,37 +280,63 @@ class SingleTask(BaseTask):
                 result = await self._execute_with_error_handling(_execute, item_to_process)
                 return (index, result)
 
-            # Process all items concurrently but maintain order - use context.run to propagate context
-            tasks = [
-                ctx.run(
+            # Start all tasks
+            for item_with_index in items_with_index:
+                index = item_with_index[0]
+                task = ctx.run(
                     lambda item=item_with_index: asyncio.create_task(
                         _execute_item(item)
                     )
                 )
-                for item_with_index in items_with_index
-            ]
-            results = await asyncio.gather(*tasks)
+                pending_tasks[index] = task
 
-            # Sort results by original order and yield them
-            results.sort(key=lambda x: x[0])  # Sort by index
-            for index, result in results:
-                if result is None:
-                    continue  # Skip this item
+            # Process completions in order
+            while pending_tasks or completed_buffer:
+                if pending_tasks:
+                    # Wait for any task to complete
+                    done, pending = await asyncio.wait(
+                        pending_tasks.values(), return_when=asyncio.FIRST_COMPLETED
+                    )
 
-                # Check if result is an async generator (from async generator function)
-                if inspect.isasyncgen(result):
-                    async for out in result:
-                        yield out
-                # Check if result is a regular generator (from generator function)
-                elif inspect.isgenerator(result):
-                    for out in result:
-                        yield out
-                # Check if result is iterable but not string/bytes
-                elif isinstance(result, list):
-                    for out in result:
-                        yield out
-                else:
-                    yield result
+                    for completed_task in done:
+                        # Find which index this task belongs to
+                        task_index = None
+                        for idx, task in pending_tasks.items():
+                            if task == completed_task:
+                                task_index = idx
+                                break
+
+                        if task_index is not None:
+                            index, result = await completed_task
+                            completed_buffer[index] = result
+                            del pending_tasks[task_index]
+
+                # Yield all consecutive items starting from next_expected_index
+                while next_expected_index in completed_buffer:
+                    result = completed_buffer[next_expected_index]
+                    del completed_buffer[next_expected_index]
+
+                    if result is None:
+                        next_expected_index += 1
+                        continue  # Skip this item
+
+                    # Check if result is an async generator (from async generator function)
+                    if inspect.isasyncgen(result):
+                        async for out in result:
+                            yield out
+                    # Check if result is a regular generator (from generator function)
+                    elif inspect.isgenerator(result):
+                        for out in result:
+                            yield out
+                    # Check if result is iterable but not string/bytes
+                    elif isinstance(result, list):
+                        for out in result:
+                            yield out
+                    else:
+                        yield result
+
+                    next_expected_index += 1
+
         return _gen()
 
     async def _process_as_completed(
@@ -569,5 +607,6 @@ class BatchTask(BaseTask):
                         yield result
 
         return _gen()
+
 
 __all__ = ["BaseTask", "SingleTask", "BatchTask"]

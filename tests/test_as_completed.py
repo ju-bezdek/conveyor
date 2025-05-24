@@ -7,7 +7,7 @@ from conveyor.stream import AsyncStream
 @single_task
 async def slow_task(x: int) -> int:
     """Task with variable delay based on input value."""
-    delay = x * 0.1  # Larger numbers take longer
+    delay = x * 0.1  # 0.1s per unit
     await asyncio.sleep(delay)
     return x * 2
 
@@ -370,29 +370,179 @@ async def test_mixed_execution_modes_with_batching():
 async def test_single_task_as_completed_vs_ordered_timing():
     """Test timing difference between as_completed and ordered execution for single tasks."""
     input_data = [3, 1, 2]  # Different processing times
-    
+
     pipeline = slow_task
-    
+
     # Test ordered execution timing
     ordered_start = time.time()
     ordered_results = await pipeline(input_data).collect()
     ordered_time = time.time() - ordered_start
-    
+
     # Test as_completed execution timing
     completed_start = time.time()
     completed_results = []
     async for result in pipeline.as_completed(input_data):
         completed_results.append(result)
     completed_time = time.time() - completed_start
-    
+
     # Both should have same results but different timing characteristics
     assert sorted(ordered_results) == sorted(completed_results)
-    
+
     # as_completed should complete in roughly the time of the longest task
     # ordered waits for all tasks but can process them concurrently
     # The timing difference might be small for this simple case
     print(f"Ordered: {ordered_time:.3f}s, As-completed: {completed_time:.3f}s")
-    
+
     # Verify results are correct
     assert sorted(ordered_results) == [2, 4, 6]  # [1*2, 2*2, 3*2]
     assert sorted(completed_results) == [2, 4, 6]
+
+
+@pytest.mark.asyncio
+async def test_ordered_streaming_performance():
+    """Test that ordered processing enables streaming while preserving order."""
+    # Test with items that have different processing times
+    # Item processing times: [3s, 1s, 2s, 0.5s]
+    input_data = [0.3, 0.1, 0.2, 0.05]  # Use smaller delays for testing
+
+    @single_task
+    async def process_with_delay(x: float) -> dict:
+        start_time = time.time()
+        await asyncio.sleep(x)  # Sleep for x seconds
+        end_time = time.time()
+        return {
+            "input": x,
+            "processing_time": round(end_time - start_time, 3),
+            "completed_at": end_time,
+        }
+
+    pipeline = Pipeline().add(process_with_delay)
+
+    # Test streaming behavior - track when each result is yielded
+    start_time = time.time()
+    results = []
+    yield_times = []
+
+    async for result in pipeline(input_data):
+        yield_time = time.time() - start_time
+        yield_times.append(yield_time)
+        results.append(result)
+        print(f"Yielded result for input {result['input']} at {yield_time:.3f}s")
+
+    total_time = time.time() - start_time
+
+    # Verify order preservation
+    yielded_inputs = [r["input"] for r in results]
+    assert (
+        yielded_inputs == input_data
+    ), f"Order not preserved: {yielded_inputs} != {input_data}"
+
+    # Verify streaming behavior:
+    # - First result (input=0.3, 0.3s delay) should be yielded around 0.3s
+    # - Subsequent results should be yielded immediately after (they're already completed)
+    assert yield_times[0] >= 0.25, f"First result yielded too early: {yield_times[0]}s"
+    assert yield_times[0] <= 0.35, f"First result yielded too late: {yield_times[0]}s"
+
+    # Second, third, and fourth results should be yielded immediately after first
+    # (they were completed earlier but buffered)
+    for i in range(1, len(yield_times)):
+        time_diff = yield_times[i] - yield_times[0]
+        assert (
+            time_diff <= 0.01
+        ), f"Result {i} not yielded immediately after first: {time_diff}s delay"
+
+    print(f"✅ Streaming test passed!")
+    print(f"   - Total time: {total_time:.3f}s")
+    print(f"   - Yield times: {[f'{t:.3f}s' for t in yield_times]}")
+    print(f"   - Order preserved: {yielded_inputs}")
+
+
+@pytest.mark.asyncio
+async def test_ordered_vs_gather_comparison():
+    """Compare the new streaming approach vs traditional gather approach."""
+    input_data = [0.1, 0.1, 0.3, 0.05]  # Processing times
+
+    @single_task
+    async def timed_task(delay: float) -> dict:
+        start = time.time()
+        await asyncio.sleep(delay)
+        return {"delay": delay, "completed_at": time.time() - start}
+
+    pipeline = Pipeline().add(timed_task)
+
+    # Test our streaming implementation
+    streaming_start = time.time()
+    streaming_results = []
+    first_yield_time = None
+
+    async for result in pipeline(input_data):
+        if first_yield_time is None:
+            first_yield_time = time.time() - streaming_start
+        streaming_results.append(result)
+
+    streaming_total = time.time() - streaming_start
+
+    # Simulate traditional gather approach for comparison
+    gather_start = time.time()
+    tasks = []
+    for delay in input_data:
+
+        async def create_task(d=delay):
+            await asyncio.sleep(d)
+            return {"delay": d, "completed_at": time.time() - gather_start}
+
+        tasks.append(asyncio.create_task(create_task()))
+
+    gather_results = await asyncio.gather(*tasks)
+    gather_total = time.time() - gather_start
+    gather_first_yield = gather_total  # All results yielded at once
+
+    # Verify our approach yields first result much earlier than gather
+    print(f"Streaming first yield: {first_yield_time:.3f}s")
+    print(f"Gather first yield: {gather_first_yield:.3f}s")
+    print(
+        f"Improvement: {((gather_first_yield - first_yield_time) / gather_first_yield * 100):.1f}%"
+    )
+
+    # Our approach should yield first result around 0.4s (when first item completes)
+    # Gather approach yields all results around 0.4s (when slowest completes)
+    assert (
+        first_yield_time <= gather_first_yield
+    ), "Streaming should yield earlier than gather"
+
+    # Verify order preservation in both approaches
+    streaming_order = [r["delay"] for r in streaming_results]
+    gather_order = [r["delay"] for r in gather_results]
+    assert streaming_order == input_data, "Streaming didn't preserve order"
+    assert gather_order == input_data, "Gather didn't preserve order"
+
+
+@pytest.mark.asyncio
+async def test_best_case_streaming():
+    """Test best case: when first item finishes first, it should yield immediately."""
+    # First item has shortest delay, should yield immediately
+    input_data = [0.1, 0.3, 0.2, 0.4]
+
+    @single_task
+    async def delay_task(delay: float) -> float:
+        await asyncio.sleep(delay)
+        return delay
+
+    pipeline = Pipeline().add(delay_task)
+
+    start_time = time.time()
+    results = []
+
+    async for result in pipeline(input_data):
+        yield_time = time.time() - start_time
+        results.append((result, yield_time))
+        if len(results) == 1:  # First result
+            # Should be yielded around 0.1s (first item's processing time)
+            assert (
+                0.08 <= yield_time <= 0.15
+            ), f"First result not yielded promptly: {yield_time}s"
+            print(f"✅ First result yielded at {yield_time:.3f}s (expected ~0.1s)")
+            break
+
+    # Verify we got the correct first result
+    assert results[0][0] == 0.1, f"Wrong first result: {results[0][0]}"

@@ -90,6 +90,37 @@ async for result in pipeline(data_source):
     # Process each result immediately
 ```
 
+**🚀 Streaming Performance Benefits:**
+
+Conveyor's ordered processing uses an **ordered queue approach** that enables true streaming while preserving order:
+
+- **Early yielding**: Results are yielded as soon as they can be yielded in order
+- **Maximum parallelism**: All items process concurrently, not sequentially  
+- **Pipeline efficiency**: Subsequent stages can start processing early results immediately
+
+**Timeline Example (Optimal Scenario):**
+```
+Input tasks with processing times: [0.1s, 0.2s, 0.3s, 0.4s, 0.5s, 2.0s, 0.7s, 0.8s]
+
+Traditional approach (waits for all):
+Time: 2.0s → ALL results yielded at once
+
+Conveyor's streaming approach:
+Time: 0.1s → yield result 1 ⚡ IMMEDIATE
+Time: 0.2s → yield result 2 ⚡ IMMEDIATE  
+Time: 0.3s → yield result 3 ⚡ IMMEDIATE
+Time: 0.4s → yield result 4 ⚡ IMMEDIATE
+Time: 0.5s → yield result 5 ⚡ IMMEDIATE
+Time: 2.0s → yield results 6,7,8 (7,8 were buffered, waiting for 6)
+
+Benefits: 🎯 First 5 results available 75% faster!
+```
+
+**Order Preservation with Outliers:**
+- Fast tasks stream immediately when they're next in order
+- Slow outliers block subsequent results to maintain order  
+- Once outliers complete, buffered results yield immediately
+- **Never performs worse** than traditional batch processing
 
 ### Option 2: Collecting All Results
 
