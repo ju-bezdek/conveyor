@@ -1,5 +1,10 @@
 # Conveyor
 
+[![Tests](https://github.com/ju-bezdek/conveyor/workflows/Tests/badge.svg)](https://github.com/ju-bezdek/conveyor/actions)
+[![codecov](https://codecov.io/gh/ju-bezdek/conveyor/branch/main/graph/badge.svg)](https://codecov.io/gh/ju-bezdek/conveyor)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A Python library for efficient asynchronous pipeline processing with real-time streaming capabilities.
 
 This library implements streaming of intermediate results between pipeline stages, allowing subsequent tasks to begin processing as soon as any individual item completes a stage, while still preserving original input ordering when needed.
@@ -531,24 +536,4 @@ async def main_error_handling():
 
 if __name__ == "__main__":
     asyncio.run(main_error_handling())
-```
-
-**Error Handling Flow:**
-
-```mermaid
-graph TD
-    A[Task Execution] --> B{Error Occurs?}
-    B -->|No| C[Return Result]
-    B -->|Yes| D{Retry Attempts Left?}
-    D -->|Yes| E[Wait with Backoff]
-    E --> A
-    D -->|No| F{Custom Handler?}
-    F -->|Yes| G[Custom Handler Logic]
-    F -->|No| H{on_error Setting}
-    G --> I{Handler Says Continue?}
-    I -->|Yes| J[Use Handler Value]
-    I -->|No| K[Raise Error]
-    H -->|fail| K
-    H -->|skip_item| L[Skip Item]
-    H -->|skip_batch| M[Skip Batch]
 ```
