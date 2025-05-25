@@ -2,7 +2,7 @@
 
 A Python library for efficient asynchronous pipeline processing with real-time streaming capabilities.
 
-This library implements ordered streaming of intermediate results between pipeline stages, allowing subsequent tasks to begin processing as soon as any individual item completes a stage, while still preserving original input ordering when needed.
+This library implements streaming of intermediate results between pipeline stages, allowing subsequent tasks to begin processing as soon as any individual item completes a stage, while still preserving original input ordering when needed.
 
 ## Key Benefits
 

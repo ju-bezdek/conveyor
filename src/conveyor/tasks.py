@@ -201,6 +201,313 @@ class SingleTask(BaseTask):
                 items, current_resolved_args, current_resolved_kwargs
             )
 
+    async def _execute_single_item(
+        self,
+        item_to_process: Any,
+        resolved_args: List[Any],
+        resolved_kwargs: dict[str, Any],
+    ) -> Any:
+        """Shared method to execute a single item with proper error handling."""
+
+        async def _execute():
+            if item_to_process != UNDEFINED_VALUE:
+                _args = (item_to_process, *resolved_args)
+            else:
+                _args = resolved_args
+
+            # Handle bound methods properly
+            if self._instance is not None:
+                # This is a bound method, call with instance
+                if inspect.isasyncgenfunction(self.func):
+                    return self.func(self._instance, *_args, **resolved_kwargs)
+                elif asyncio.iscoroutinefunction(self.func):
+                    return await self.func(self._instance, *_args, **resolved_kwargs)
+                else:
+                    result = self.func(self._instance, *_args, **resolved_kwargs)
+                    if inspect.isgeneratorfunction(self.func):
+                        return result  # Return the generator itself
+                    return result
+            else:
+                # Regular function or already bound method
+                if inspect.isasyncgenfunction(self.func):
+                    return self.func(*_args, **resolved_kwargs)
+                elif asyncio.iscoroutinefunction(self.func):
+                    return await self.func(*_args, **resolved_kwargs)
+                else:
+                    result = self.func(*_args, **resolved_kwargs)
+                    if inspect.isgeneratorfunction(self.func):
+                        return result  # Return the generator itself
+                    return result
+
+        return await self._execute_with_error_handling(_execute, item_to_process)
+
+    async def _yield_result(self, result: Any) -> AsyncIterable[Any]:
+        """Shared method to properly yield results based on their type."""
+        if result is None:
+            return  # Skip this item
+
+        # Check if result is an async generator (from async generator function)
+        if inspect.isasyncgen(result):
+            async for out in result:
+                yield out
+        # Check if result is a regular generator (from generator function)
+        elif inspect.isgenerator(result):
+            for out in result:
+                yield out
+        # Check if result is iterable but not string/bytes
+        elif isinstance(result, list):
+            for out in result:
+                yield out
+        else:
+            yield result
+
+    async def _process_streaming_core(
+        self,
+        items: AsyncIterable[T],
+        resolved_args: List[Any],
+        resolved_kwargs: dict[str, Any],
+        preserve_order: bool = True,
+    ) -> AsyncIterable[Any]:
+        """
+        Core streaming processor that starts processing items as they arrive.
+
+        Args:
+            preserve_order: If True, yields results in input order (buffering when needed).
+                          If False, yields results as they complete.
+        """
+        async def _gen():
+            if preserve_order:
+                # Ordered processing with streaming
+                next_expected_index = 0
+                completed_buffer = {}  # {index: result}
+                pending_tasks = {}  # {index: task}
+                input_finished = False
+                current_index = 0
+
+                # Create a queue to handle items as they arrive
+                item_queue = asyncio.Queue()
+
+                # Task to consume input stream and feed queue
+                async def input_feeder():
+                    nonlocal input_finished, current_index
+                    try:
+                        async for item in items:
+                            await item_queue.put((current_index, item))
+                            current_index += 1
+                    finally:
+                        input_finished = True
+                        await item_queue.put(None)  # Sentinel to signal end
+
+                # Start the input feeder
+                feeder_task = asyncio.create_task(input_feeder())
+
+                try:
+                    # Process items as they arrive
+                    while True:
+                        # Check if we can yield any completed results in order
+                        while next_expected_index in completed_buffer:
+                            result = completed_buffer.pop(next_expected_index)
+                            async for output in self._yield_result(result):
+                                yield output
+                            next_expected_index += 1
+
+                        # If input is finished and no pending tasks and queue is empty, we're done
+                        if input_finished and not pending_tasks and item_queue.empty():
+                            break
+
+                        # Wait for either a new item or a task completion
+                        wait_tasks = []
+                        queue_get_task = None
+
+                        # Add item queue get if we might have more items
+                        if not input_finished or not item_queue.empty():
+                            queue_get_task = asyncio.create_task(item_queue.get())
+                            wait_tasks.append(queue_get_task)
+
+                        # Add pending task completions
+                        if pending_tasks:
+                            wait_tasks.extend(pending_tasks.values())
+
+                        if not wait_tasks:
+                            # This shouldn't happen, but break to avoid infinite loop
+                            break
+
+                        done, pending_wait_tasks = await asyncio.wait(
+                            wait_tasks, return_when=asyncio.FIRST_COMPLETED
+                        )
+
+                        # Only cancel the queue get task if it wasn't completed
+                        # NEVER cancel processing tasks!
+                        for task in pending_wait_tasks:
+                            if task == queue_get_task and not task.done():
+                                task.cancel()
+
+                        for completed_task in done:
+                            # Check if this is a new item from queue
+                            if queue_get_task and completed_task == queue_get_task:
+                                try:
+                                    queue_result = await completed_task
+                                    if queue_result is None:  # Sentinel value
+                                        # Input is finished, no more items
+                                        continue
+
+                                    index, item = queue_result
+                                    # Start processing this item
+                                    task = asyncio.create_task(
+                                        self._execute_single_item(
+                                            item, resolved_args, resolved_kwargs
+                                        )
+                                    )
+                                    pending_tasks[index] = task
+                                except asyncio.CancelledError:
+                                    # Queue get was cancelled, that's fine
+                                    pass
+                            else:
+                                # This is a completed processing task
+                                task_index = None
+                                for idx, task in pending_tasks.items():
+                                    if task == completed_task:
+                                        task_index = idx
+                                        break
+
+                                if task_index is not None:
+                                    result = await completed_task
+                                    completed_buffer[task_index] = result
+                                    del pending_tasks[task_index]
+
+                finally:
+                    # Clean up
+                    if not feeder_task.done():
+                        feeder_task.cancel()
+                        try:
+                            await feeder_task
+                        except asyncio.CancelledError:
+                            pass
+
+                    # Only cancel processing tasks if we're exiting due to an error
+                    # Otherwise let them complete naturally
+                    for task in pending_tasks.values():
+                        if not task.done():
+                            task.cancel()
+
+                    # Yield any remaining results in order
+                    while next_expected_index in completed_buffer:
+                        result = completed_buffer.pop(next_expected_index)
+                        async for output in self._yield_result(result):
+                            yield output
+                        next_expected_index += 1
+
+            else:
+                # As-completed processing - process items as they arrive, yield results as they complete
+                pending_tasks = set()
+                input_finished = False
+
+                # Create a queue to handle items as they arrive
+                item_queue = asyncio.Queue()
+
+                # Task to consume input stream and feed queue
+                async def input_feeder():
+                    nonlocal input_finished
+                    try:
+                        async for item in items:
+                            await item_queue.put(item)
+                    finally:
+                        input_finished = True
+                        await item_queue.put(None)  # Sentinel to signal end
+
+                # Start the input feeder
+                feeder_task = asyncio.create_task(input_feeder())
+
+                try:
+                    # Process items as they arrive, yield results as they complete
+                    while True:
+                        # If input is finished and no pending tasks, we're done
+                        if input_finished and not pending_tasks:
+                            break
+
+                        # Wait for either a new item or a task completion
+                        wait_tasks = []
+                        queue_get_task = None
+
+                        # Add item queue get if we might have more items
+                        if not input_finished or not item_queue.empty():
+                            queue_get_task = asyncio.create_task(item_queue.get())
+                            wait_tasks.append(queue_get_task)
+
+                        # Add pending task completions
+                        if pending_tasks:
+                            wait_tasks.extend(pending_tasks)
+
+                        if not wait_tasks:
+                            # This shouldn't happen, but break to avoid infinite loop
+                            break
+
+                        done, pending_wait_tasks = await asyncio.wait(
+                            wait_tasks, return_when=asyncio.FIRST_COMPLETED
+                        )
+
+                        # Only cancel the queue get task if it wasn't completed
+                        # NEVER cancel processing tasks!
+                        for task in pending_wait_tasks:
+                            if task == queue_get_task and not task.done():
+                                task.cancel()
+
+                        for completed_task in done:
+                            # Check if this is a new item from queue
+                            if queue_get_task and completed_task == queue_get_task:
+                                try:
+                                    queue_result = await completed_task
+                                    if queue_result is None:  # Sentinel value
+                                        # Input is finished, no more items
+                                        continue
+
+                                    # Start processing this item immediately
+                                    task = asyncio.create_task(
+                                        self._execute_single_item(
+                                            queue_result, resolved_args, resolved_kwargs
+                                        )
+                                    )
+                                    pending_tasks.add(task)
+                                except asyncio.CancelledError:
+                                    # Queue get was cancelled, that's fine
+                                    pass
+                            else:
+                                # This is a completed processing task
+                                if completed_task in pending_tasks:
+                                    pending_tasks.remove(completed_task)
+                                    try:
+                                        result = await completed_task
+                                        # Yield results immediately as they complete
+                                        async for output in self._yield_result(result):
+                                            yield output
+                                    except Exception:
+                                        # Skip failed tasks - error handling should be done at task level
+                                        pass
+
+                finally:
+                    # Clean up
+                    if not feeder_task.done():
+                        feeder_task.cancel()
+                        try:
+                            await feeder_task
+                        except asyncio.CancelledError:
+                            pass
+
+                    # Only cancel processing tasks if we're exiting due to an error
+                    # Otherwise let them complete naturally and yield their results
+                    remaining_tasks = list(pending_tasks)
+                    if remaining_tasks:
+                        for completed_task in asyncio.as_completed(remaining_tasks):
+                            try:
+                                result = await completed_task
+                                async for output in self._yield_result(result):
+                                    yield output
+                            except Exception:
+                                # Skip failed tasks
+                                pass
+
+        return _gen()
+
     async def _process_ordered(
         self,
         items: AsyncIterable[T],
@@ -208,134 +515,9 @@ class SingleTask(BaseTask):
         resolved_kwargs: dict[str, Any],
     ) -> AsyncIterable[Any]:
         """Process items preserving order while enabling streaming as soon as possible."""
-        async def _gen():
-            # Get the current context to propagate to tasks
-            current_context = self.get_context()
-
-            # Collect all items first with their order index
-            items_with_index = []
-            index = 0
-            async for item in items:
-                items_with_index.append((index, item))
-                index += 1
-
-            if not items_with_index:
-                return  # No items to process
-
-            # Create tasks for concurrent processing
-            ctx = copy_context()
-            next_expected_index = 0
-            completed_buffer = {}  # {index: result}
-            pending_tasks = {}  # {index: task}
-
-            async def _execute_item(index_and_item):
-                index, item_to_process = index_and_item
-                if item_to_process != UNDEFINED_VALUE:
-                    _args = (item_to_process, *resolved_args)
-                else:
-                    _args = resolved_args
-                async def _execute():
-                    # Handle bound methods properly
-                    if self._instance is not None:
-                        # This is a bound method, call with instance
-                        if inspect.isasyncgenfunction(self.func):
-                            # Handle async generator functions - return the generator itself
-                            return self.func(
-                                self._instance,
-                                *_args,
-                                **resolved_kwargs,
-                            )
-                        elif asyncio.iscoroutinefunction(self.func):
-                            return await self.func(
-                                self._instance,
-                                *_args,
-                                **resolved_kwargs,
-                            )
-                        else:
-                            result = self.func(
-                                self._instance,
-                                *_args,
-                                **resolved_kwargs,
-                            )
-                            # Handle regular generator functions
-                            if inspect.isgeneratorfunction(self.func):
-                                return result  # Return the generator itself
-                            return result
-                    else:
-                        # Regular function or already bound method
-                        if inspect.isasyncgenfunction(self.func):
-                            # Handle async generator functions - return the generator itself
-                            return self.func(*_args, **resolved_kwargs)
-                        elif asyncio.iscoroutinefunction(self.func):
-                            return await self.func(*_args, **resolved_kwargs)
-                        else:
-                            result = self.func(*_args, **resolved_kwargs)
-                            # Handle regular generator functions
-                            if inspect.isgeneratorfunction(self.func):
-                                return result  # Return the generator itself
-                            return result
-
-                result = await self._execute_with_error_handling(_execute, item_to_process)
-                return (index, result)
-
-            # Start all tasks
-            for item_with_index in items_with_index:
-                index = item_with_index[0]
-                task = ctx.run(
-                    lambda item=item_with_index: asyncio.create_task(
-                        _execute_item(item)
-                    )
-                )
-                pending_tasks[index] = task
-
-            # Process completions in order
-            while pending_tasks or completed_buffer:
-                if pending_tasks:
-                    # Wait for any task to complete
-                    done, pending = await asyncio.wait(
-                        pending_tasks.values(), return_when=asyncio.FIRST_COMPLETED
-                    )
-
-                    for completed_task in done:
-                        # Find which index this task belongs to
-                        task_index = None
-                        for idx, task in pending_tasks.items():
-                            if task == completed_task:
-                                task_index = idx
-                                break
-
-                        if task_index is not None:
-                            index, result = await completed_task
-                            completed_buffer[index] = result
-                            del pending_tasks[task_index]
-
-                # Yield all consecutive items starting from next_expected_index
-                while next_expected_index in completed_buffer:
-                    result = completed_buffer[next_expected_index]
-                    del completed_buffer[next_expected_index]
-
-                    if result is None:
-                        next_expected_index += 1
-                        continue  # Skip this item
-
-                    # Check if result is an async generator (from async generator function)
-                    if inspect.isasyncgen(result):
-                        async for out in result:
-                            yield out
-                    # Check if result is a regular generator (from generator function)
-                    elif inspect.isgenerator(result):
-                        for out in result:
-                            yield out
-                    # Check if result is iterable but not string/bytes
-                    elif isinstance(result, list):
-                        for out in result:
-                            yield out
-                    else:
-                        yield result
-
-                    next_expected_index += 1
-
-        return _gen()
+        return await self._process_streaming_core(
+            items, resolved_args, resolved_kwargs, preserve_order=True
+        )
 
     async def _process_as_completed(
         self,
@@ -344,103 +526,9 @@ class SingleTask(BaseTask):
         resolved_kwargs: dict[str, Any],
     ) -> AsyncIterable[Any]:
         """Process items yielding results as they complete."""
-
-        async def _gen():
-            # Collect all items and create tasks
-            tasks = []
-            items_list = []
-            async for item in items:
-                items_list.append(item)
-
-            # Create tasks for all items
-            for item in items_list:
-
-                async def _execute_item(
-                    item_to_process=item,
-                ):  # Capture item in closure
-                    async def _execute():
-                        if item_to_process != UNDEFINED_VALUE:
-                            _args = (item_to_process, *resolved_args)
-                        else:
-                            _args = resolved_args
-                        # Handle bound methods properly
-                        if self._instance is not None:
-                            # This is a bound method, call with instance
-                            if inspect.isasyncgenfunction(self.func):
-                                # Handle async generator functions - return the generator itself
-                                return self.func(
-                                    self._instance,
-                                    *_args,
-                                    **resolved_kwargs,
-                                )
-                            elif asyncio.iscoroutinefunction(self.func):
-                                return await self.func(
-                                    self._instance,
-                                    *_args,
-                                    **resolved_kwargs,
-                                )
-                            else:
-                                result = self.func(
-                                    self._instance,
-                                    *_args,
-                                    **resolved_kwargs,
-                                )
-                                # Handle regular generator functions
-                                if inspect.isgeneratorfunction(self.func):
-                                    return result  # Return the generator itself
-                                return result
-                        else:
-                            # Regular function or already bound method
-                            if inspect.isasyncgenfunction(self.func):
-                                # Handle async generator functions - return the generator itself
-                                return self.func(*_args, **resolved_kwargs)
-                            elif asyncio.iscoroutinefunction(self.func):
-                                return await self.func(*_args, **resolved_kwargs)
-                            else:
-                                result = self.func(*_args, **resolved_kwargs)
-                                # Handle regular generator functions
-                                if inspect.isgeneratorfunction(self.func):
-                                    return result  # Return the generator itself
-                                return result
-
-                    try:
-                        result = await self._execute_with_error_handling(
-                            _execute, item_to_process
-                        )
-                        return result
-                    except Exception:
-                        # Skip failed items in as_completed mode
-                        return None
-
-                task = asyncio.create_task(_execute_item())
-                tasks.append(task)
-
-            # Yield results as they complete
-            for completed_task in asyncio.as_completed(tasks):
-                try:
-                    result = await completed_task
-                    if result is None:
-                        continue  # Skip this item
-
-                    # Check if result is an async generator (from async generator function)
-                    if inspect.isasyncgen(result):
-                        async for out in result:
-                            yield out
-                    # Check if result is a regular generator (from generator function)
-                    elif inspect.isgenerator(result):
-                        for out in result:
-                            yield out
-                    # Check if result is iterable but not string/bytes
-                    elif isinstance(result, list):
-                        for out in result:
-                            yield out
-                    else:
-                        yield result
-                except Exception:
-                    # Skip failed tasks - error handling should be done at task level
-                    continue
-
-        return _gen()
+        return await self._process_streaming_core(
+            items, resolved_args, resolved_kwargs, preserve_order=False
+        )
 
 
 class BatchTask(BaseTask):
