@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "conveyor"
-version = "0.1.0"
+version = "1.0.0"
 description = "A Python library for streamlining asynchronous streaming tasks and pipelines."
 authors = ["Your Name <you@example.com>"] # TODO: Replace with your details
 readme = "README.md"
