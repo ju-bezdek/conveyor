@@ -7,7 +7,22 @@
 
 A Python library for efficient asynchronous pipeline processing with real-time streaming capabilities.
 
-This library implements streaming of intermediate results between pipeline stages, allowing subsequent tasks to begin processing as soon as any individual item completes a stage, while still preserving original input ordering when needed.
+This library implements streaming of intermediate results between pipeline stages, allowing subsequent tasks to begin processing as soon as any individual item completes a stage, while still preserving original input ordering when needed by default (with option for streaming ASAP and wait for all to be completed).
+
+### The fundamental challenge:
+> ```python
+> # This pattern is everywhere, but streaming is hard:
+> # Especially if different chunks can take different time to process
+> 
+> Individual Processing → Batch Processing → Individual Processing
+>        (fast)              (slower)           (fast)
+> 
+> 
+> # Examples:
+> # • Fetch RAG results → Re-Rank → Enrich ( → stream to UI)
+> # • Compress → ML batch inference → Apply
+> # • Validate → Batch database ops → Send notifications
+> ```
 
 ## Key Benefits
 
@@ -537,3 +552,44 @@ async def main_error_handling():
 if __name__ == "__main__":
     asyncio.run(main_error_handling())
 ```
+
+
+## Alternatives
+
+While there are several libraries in adjacent spaces, none directly address the specific challenge of streaming results from mixed single/batch task pipelines. Here's how Conveyor compares to existing solutions:
+
+### Workflow Orchestration Platforms
+
+**Prefect, Airflow, Dagster**
+- **What they do**: Orchestrate complex DAG-based workflows with scheduling, monitoring, and error recovery
+- **Gap**: Designed for batch-oriented ETL workflows, not real-time streaming of intermediate results
+- **Use case**: Great for scheduled data pipelines, but won't help with streaming progressive results to users
+
+**When to use instead**: Large-scale ETL orchestration with complex dependencies and scheduling requirements
+
+### Distributed Computing Frameworks
+
+**Ray, Dask**
+- **What they do**: Distributed computing with parallel task execution across clusters
+- **Gap**: Much heavier weight, focused on distributed computing rather than pipeline streaming coordination
+- **Use case**: Large-scale distributed processing, not single-machine streaming pipelines
+
+**When to use instead**: When you need to scale across multiple machines or have very large datasets
+
+### Task Queue Systems
+
+**Celery, RQ, Dramatiq**
+- **What they do**: Distributed task queues for background job processing
+- **Gap**: Focused on job distribution and execution, not streaming intermediate results between pipeline stages
+- **Use case**: Background job processing, not real-time result streaming
+
+**When to use instead**: When you need distributed task execution across multiple workers
+
+### Stream Processing Frameworks
+
+**Apache Kafka Streams, Apache Beam**
+- **What they do**: Event-driven stream processing for real-time data pipelines
+- **Gap**: Different paradigm (event streaming), not async Python task pipelines
+- **Use case**: Event-driven architectures with message queues
+
+**When to use instead**: Event-driven systems with external message brokers

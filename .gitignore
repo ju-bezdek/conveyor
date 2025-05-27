@@ -34,3 +34,4 @@ env/
 ehthumbs.db
 Thumbs.db
 _build
+__*.md
