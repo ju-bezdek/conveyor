@@ -9,7 +9,6 @@ This section provides comprehensive guides for using Conveyor Streaming effectiv
 - [Streaming](streaming.md) - Master streaming patterns and consumption strategies
 - [Error Handling](error-handling.md) - Implement robust error recovery and retry strategies
 - [Side Inputs](side-inputs.md) - Use external data sources in your pipelines
-- [Performance](performance.md) - Optimize your pipelines for maximum throughput
 - [Best Practices](best-practices.md) - Production-ready patterns and recommendations
 
 ## Overview

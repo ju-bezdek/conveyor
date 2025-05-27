@@ -57,7 +57,7 @@ api/index
 Install Conveyor using pip:
 
 ```bash
-pip install conveyor
+pip install conveyor-streaming
 ```
 
 ## Basic Example

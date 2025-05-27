@@ -192,7 +192,6 @@ async for result in pipeline(data_stream()):
 - Explore the [user guide](user-guide/index.md) for comprehensive documentation
 - Check out [examples](examples/index.md) for real-world scenarios  
 - Learn about [error handling](user-guide/error-handling.md) strategies
-- Optimize performance with [performance tips](user-guide/performance.md)
 
 ## Performance Tips
 
