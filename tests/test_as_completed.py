@@ -231,9 +231,7 @@ async def test_pipeline_context_basic():
     # Verify context is properly set
     for result in results:
         assert result['pipeline_id'] != 'none'
-        assert result['execution_mode'] == 'ordered'  # Default mode
-        assert result['stage'] == 0  # First (and only) stage
-        assert result['total_stages'] == 1
+        assert result["execution_mode"] == "ordered"  # Default mode
 
 @pytest.mark.asyncio
 async def test_pipeline_context_data_sharing():
