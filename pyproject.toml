@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "conveyor-streaming"
-version = "1.0.0"
+version = "1.1.0"
 description = "A Python library for streamlining asynchronous streaming tasks and pipelines."
 authors = ["ju-bezdek <juraj.bezdek@gmail.com>"] 
 readme = "README.md"
