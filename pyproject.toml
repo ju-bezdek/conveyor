@@ -5,8 +5,9 @@ description = "A Python library for streamlining asynchronous streaming tasks an
 authors = ["ju-bezdek <juraj.bezdek@gmail.com>"] 
 readme = "README.md"
 license = "MIT" # TODO: Choose an appropriate license
-repository = "https://github.com/ju-bezdek/conveyor" # TODO: Replace with your repository URL
+repository = "https://github.com/ju-bezdek/conveyor"
 keywords = ["async", "streaming", "pipeline", "data processing"]
+documentation = "https://conveyor-streaming.readthedocs.io/"
 
 [tool.poetry.dependencies]
 python = "^3.11"
