@@ -136,19 +136,25 @@ class BaseTask:
 
 
 class SingleTask(BaseTask):
-    def __init__(self, func: Callable[..., Union[Iterable[Any], Any, None]], 
-                 _side_args: Optional[List[Any]] = None, 
-                 _side_kwargs: Optional[dict[str, Any]] = None,
-                 on_error: ErrorAction = "fail",
-                 retry_config: Optional[RetryConfig] = None,
-                 error_handler: Optional[ErrorHandler] = None,
-                 task_name: Optional[str] = None):
+
+    def __init__(
+        self,
+        func: Callable[..., Union[Iterable[Any], Any, None]],
+        _side_args: Optional[List[Any]] = None,
+        _side_kwargs: Optional[dict[str, Any]] = None,
+        on_error: ErrorAction = "fail",
+        retry_config: Optional[RetryConfig] = None,
+        error_handler: Optional[ErrorHandler] = None,
+        task_name: Optional[str] = None,
+        concurrency_limit: Optional[int] = None,
+    ):
         super().__init__(on_error, retry_config, error_handler, task_name)
         self.func = func
         self._side_args = _side_args or []
         self._side_kwargs = _side_kwargs or {}
         self._resolved_side_values: Optional[tuple[List[Any], dict[str, Any]]] = None
         self._instance = None  # Store the instance for bound methods
+        self.concurrency_limit = concurrency_limit
 
     def __get__(self, instance, owner):
         """Descriptor protocol to handle bound methods."""
@@ -164,6 +170,7 @@ class SingleTask(BaseTask):
             self.retry_config,
             self.error_handler,
             self.task_name,
+            self.concurrency_limit,
         )
         bound_task._instance = instance
         return bound_task
@@ -171,13 +178,14 @@ class SingleTask(BaseTask):
     def with_inputs(self, *args: Any, **kwargs: Any) -> 'SingleTask':
         """Returns a new SingleTask instance configured with side inputs."""
         return SingleTask(
-            self.func, 
-            _side_args=list(args), 
+            self.func,
+            _side_args=list(args),
             _side_kwargs=kwargs,
             on_error=self.on_error,
             retry_config=self.retry_config,
             error_handler=self.error_handler,
-            task_name=self.task_name
+            task_name=self.task_name,
+            concurrency_limit=self.concurrency_limit,
         )
 
     async def process(self, items: AsyncIterable[T]) -> AsyncIterable[Any]:
@@ -275,6 +283,21 @@ class SingleTask(BaseTask):
             preserve_order: If True, yields results in input order (buffering when needed).
                           If False, yields results as they complete.
         """
+        # Create a semaphore if concurrency limit is set
+        semaphore = (
+            asyncio.Semaphore(self.concurrency_limit)
+            if self.concurrency_limit
+            else None
+        )
+
+        async def _execute_with_semaphore(item, args, kwargs):
+            """Execute an item with semaphore control if concurrency limit is set."""
+            if semaphore:
+                async with semaphore:
+                    return await self._execute_single_item(item, args, kwargs)
+            else:
+                return await self._execute_single_item(item, args, kwargs)
+
         async def _gen():
             if preserve_order:
                 # Ordered processing with streaming
@@ -352,9 +375,9 @@ class SingleTask(BaseTask):
                                         continue
 
                                     index, item = queue_result
-                                    # Start processing this item
+                                    # Start processing this item with semaphore control
                                     task = asyncio.create_task(
-                                        self._execute_single_item(
+                                        _execute_with_semaphore(
                                             item, resolved_args, resolved_kwargs
                                         )
                                     )
@@ -461,9 +484,9 @@ class SingleTask(BaseTask):
                                         # Input is finished, no more items
                                         continue
 
-                                    # Start processing this item immediately
+                                    # Start processing this item immediately with semaphore control
                                     task = asyncio.create_task(
-                                        self._execute_single_item(
+                                        _execute_with_semaphore(
                                             queue_result, resolved_args, resolved_kwargs
                                         )
                                     )

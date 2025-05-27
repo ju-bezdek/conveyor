@@ -1,4 +1,4 @@
-# Conveyor
+# Conveyor Streaming
 
 [![Tests](https://github.com/ju-bezdek/conveyor/workflows/Tests/badge.svg)](https://github.com/ju-bezdek/conveyor/actions)
 [![codecov](https://codecov.io/gh/ju-bezdek/conveyor/branch/main/graph/badge.svg)](https://codecov.io/gh/ju-bezdek/conveyor)
@@ -34,7 +34,7 @@ This library implements streaming of intermediate results between pipeline stage
 ## Installation
 
 ```bash
-pip install conveyor 
+pip install conveyor-streaming 
 ```
 
 

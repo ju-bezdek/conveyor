@@ -1,8 +1,8 @@
-\
 import pytest
 import asyncio
 from conveyor.tasks import SingleTask, BatchTask
 from conveyor.stream import AsyncStream # For creating test inputs
+from conveyor import single_task, Pipeline
 
 async def async_gen_from_list(data):
     for item in data:
@@ -229,3 +229,128 @@ async def test_batch_task_min_size_one_processes_all_remainders():
     async for item in await task.process(stream): # MODIFIED
         results.append(item)
     assert results == [1,2,3,4,5]
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit():
+    """Test that concurrency_limit properly limits concurrent operations."""
+    # Track concurrent operations
+    concurrent_count = 0
+    max_concurrent = 0
+
+    @single_task(concurrency_limit=2)
+    async def slow_task(item):
+        nonlocal concurrent_count, max_concurrent
+        concurrent_count += 1
+        max_concurrent = max(max_concurrent, concurrent_count)
+
+        # Simulate slow operation
+        await asyncio.sleep(0.1)
+
+        concurrent_count -= 1
+        return item * 2
+
+    # Process 5 items - should never have more than 2 concurrent
+    items = list(range(5))
+    results = []
+
+    pipeline = Pipeline().add(slow_task)
+    async for result in pipeline(items):
+        results.append(result)
+
+    # Verify results are correct
+    assert sorted(results) == [0, 2, 4, 6, 8]
+
+    # Verify concurrency was limited to 2
+    assert max_concurrent <= 2
+    assert max_concurrent > 0  # Should have had some concurrency
+
+
+@pytest.mark.asyncio
+async def test_no_concurrency_limit():
+    """Test that without concurrency_limit, operations can run fully concurrent."""
+    # Track concurrent operations
+    concurrent_count = 0
+    max_concurrent = 0
+
+    @single_task  # No concurrency limit
+    async def slow_task(item):
+        nonlocal concurrent_count, max_concurrent
+        concurrent_count += 1
+        max_concurrent = max(max_concurrent, concurrent_count)
+
+        # Simulate slow operation
+        await asyncio.sleep(0.1)
+
+        concurrent_count -= 1
+        return item * 2
+
+    # Process 5 items - should be able to run all concurrently
+    items = list(range(5))
+    results = []
+
+    pipeline = Pipeline().add(slow_task)
+    async for result in pipeline(items):
+        results.append(result)
+
+    # Verify results are correct
+    assert sorted(results) == [0, 2, 4, 6, 8]
+
+    # Verify all items could run concurrently (or close to it)
+    assert max_concurrent >= 3  # Should have high concurrency
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_with_class_instance():
+    """Test concurrency_limit works with SingleTask instances."""
+    concurrent_count = 0
+    max_concurrent = 0
+
+    async def slow_task(item):
+        nonlocal concurrent_count, max_concurrent
+        concurrent_count += 1
+        max_concurrent = max(max_concurrent, concurrent_count)
+
+        await asyncio.sleep(0.1)
+
+        concurrent_count -= 1
+        return item * 3
+
+    # Create task with concurrency limit
+    task = SingleTask(slow_task, concurrency_limit=3)
+
+    items = list(range(6))
+    results = []
+
+    pipeline = Pipeline().add(task)
+    async for result in pipeline(items):
+        results.append(result)
+
+    # Verify results
+    assert sorted(results) == [0, 3, 6, 9, 12, 15]
+
+    # Verify concurrency was limited to 3
+    assert max_concurrent <= 3
+    assert max_concurrent > 0
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_preserves_order():
+    """Test that concurrency_limit still preserves order in ordered mode."""
+
+    @single_task(concurrency_limit=2)
+    async def delayed_task(item):
+        # Add variable delay to make order challenging
+        delay = 0.1 if item % 2 == 0 else 0.05
+        await asyncio.sleep(delay)
+        return item * 10
+
+    items = list(range(5))
+    results = []
+
+    pipeline = Pipeline().add(delayed_task)
+    async for result in pipeline(items):
+        results.append(result)
+
+    # Should maintain input order despite different processing times
+    assert results == [0, 10, 20, 30, 40]

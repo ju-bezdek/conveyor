@@ -1,17 +1,29 @@
 [tool.poetry]
-name = "conveyor"
+name = "conveyor-streaming"
 version = "1.0.0"
 description = "A Python library for streamlining asynchronous streaming tasks and pipelines."
-authors = ["Your Name <you@example.com>"] # TODO: Replace with your details
+authors = ["ju-bezdek <juraj.bezdek@gmail.com>"] 
 readme = "README.md"
 license = "MIT" # TODO: Choose an appropriate license
-repository = "https://github.com/yourusername/conveyor" # TODO: Replace with your repository URL
+repository = "https://github.com/ju-bezdek/conveyor" # TODO: Replace with your repository URL
 keywords = ["async", "streaming", "pipeline", "data processing"]
 
 [tool.poetry.dependencies]
 python = "^3.11"
+myst-parser = "^4.0.1"
+sphinxext-opengraph = "^0.10.0"
 
-[tool.poetry.dev-dependencies]
+
+[[tool.poetry.packages]]
+include = "conveyor"
+from = "src"
+
+
+[tool.poetry.group.dev.dependencies]
+sphinx = "^8.2.3"
+furo = "^2024.8.6"
+
+[poetry.group.dev.dependencies]
 pytest = "^7.0"
 pytest-asyncio = "^0.20" # For testing async code
 pytest-cov = "^6.1.1"

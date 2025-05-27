@@ -5,17 +5,21 @@ from .error_handling import ErrorAction, RetryConfig, ErrorHandler
 
 T = TypeVar('T')
 
-def single_task(func: Optional[Callable] = None, 
-                on_error: ErrorAction = "fail",
-                retry_attempts: int = 1,
-                retry_delay: float = 1.0,
-                retry_exponential_backoff: bool = True,
-                retry_max_delay: float = 60.0,
-                error_handler: Optional[ErrorHandler] = None,
-                task_name: Optional[str] = None):
+
+def single_task(
+    func: Optional[Callable] = None,
+    on_error: ErrorAction = "fail",
+    retry_attempts: int = 1,
+    retry_delay: float = 1.0,
+    retry_exponential_backoff: bool = True,
+    retry_max_delay: float = 60.0,
+    error_handler: Optional[ErrorHandler] = None,
+    task_name: Optional[str] = None,
+    concurrency_limit: Optional[int] = None,
+):
     """
     Decorator for creating single-item processing tasks.
-    
+
     Args:
         func: The function to wrap
         on_error: What to do when an error occurs ("fail", "skip_item")
@@ -25,6 +29,7 @@ def single_task(func: Optional[Callable] = None,
         retry_max_delay: Maximum delay between retries
         error_handler: Custom error handler
         task_name: Name for logging/debugging
+        concurrency_limit: Maximum number of concurrent operations (None for unlimited)
     """
     def decorator(f):
         retry_config = RetryConfig(
@@ -49,12 +54,14 @@ def single_task(func: Optional[Callable] = None,
             retry_config=retry_config,
             error_handler=error_handler,
             task_name=task_name or f.__name__,
+            concurrency_limit=concurrency_limit,
         )
 
     if func is None:
         return decorator
     else:
         return decorator(func)
+
 
 def batch_task(min_size: int = 1, max_size: Optional[int] = None,
                on_error: ErrorAction = "fail",
