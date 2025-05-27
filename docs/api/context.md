@@ -11,51 +11,9 @@
 
 ## Usage Examples
 
-### Basic Context Usage
+### Data Sharing Between Tasks
 
-The `PipelineContext` is used to configure pipeline execution behavior and share data between tasks during pipeline execution.
-
-```python
-from conveyor import single_task, Pipeline, PipelineContext, get_current_context
-
-@single_task
-async def process_with_context(item):
-    # Get the current pipeline context
-    context = get_current_context()
-    
-    if context:
-        # Access shared data
-        counter = context.data.get('counter', 0)
-        context.data['counter'] = counter + 1
-        
-        # Access pipeline configuration
-        print(f"Pipeline ID: {context.pipeline_id}")
-        print(f"Execution mode: {context.execution_mode}")
-        print(f"Processing item #{counter + 1}")
-    
-    return item * 2
-
-# Create pipeline with custom context
-pipeline = Pipeline()
-pipeline = pipeline.add(process_with_context)
-
-# Method 1: Set context when creating pipeline
-custom_context = PipelineContext(
-    execution_mode="as_completed",
-    max_parallelism=4,
-    data={'multiplier': 3, 'batch_name': 'test_batch'}
-)
-pipeline_with_context = pipeline.with_context(**custom_context.__dict__)
-
-# Method 2: Use with_context to modify specific settings
-pipeline_with_mode = pipeline.with_execution_mode("as_completed")
-
-# Execute pipeline
-async for result in pipeline_with_context([1, 2, 3, 4, 5]):
-    print(f"Result: {result}")
-```
-
-### Context for Data Sharing Between Tasks
+The primary purpose of `PipelineContext` is to share data between tasks during pipeline execution.
 
 ```python
 from conveyor import single_task, Pipeline, PipelineContext, get_current_context
@@ -97,9 +55,8 @@ async def process_with_stats(item):
 # Create pipeline
 pipeline = collect_metadata | process_with_stats
 
-# Run with custom context data
+# Run with initial context data
 custom_context = PipelineContext(
-    execution_mode="ordered",
     data={'batch_id': 'batch_001', 'user_id': 'user_123'}
 )
 
@@ -111,71 +68,72 @@ async for result in pipeline_with_context(data):
     print(f"Processed: {result}")
 ```
 
-### Execution Mode Configuration
+### Shared Counters and State
 
 ```python
-from conveyor import single_task, Pipeline
+from conveyor import single_task, get_current_context
 
 @single_task
-async def slow_task(item):
-    import asyncio
-    await asyncio.sleep(0.1)  # Simulate work
-    return f"Processed: {item}"
+async def increment_counter(item):
+    context = get_current_context()
+    
+    if context:
+        # Increment shared counter
+        context.data['counter'] = context.data.get('counter', 0) + 1
+        counter_value = context.data['counter']
+        
+        return {
+            'value': item,
+            'counter': counter_value,
+            'pipeline_id': context.pipeline_id[:8] if context.pipeline_id else 'unknown'
+        }
+    
+    return {'value': item, 'counter': -1}
 
-pipeline = Pipeline()
-pipeline = pipeline.add(slow_task)
+# Create pipeline with initial counter
+pipeline = increment_counter
+custom_pipeline = pipeline.with_context(data={'counter': 100})
 
-# Ordered execution (default) - preserves input order
-ordered_pipeline = pipeline.with_execution_mode("ordered")
-
-# As-completed execution - results arrive as they complete
-as_completed_pipeline = pipeline.with_execution_mode("as_completed")
-
-# Or use the as_completed() method directly
-data = [1, 2, 3, 4, 5]
-
-# These are equivalent:
-async for result in pipeline.as_completed(data):
-    print(f"Completed: {result}")
-
-async for result in pipeline.with_execution_mode("as_completed")(data):
-    print(f"Completed: {result}")
+async for result in custom_pipeline([1, 2, 3]):
+    print(f"Item: {result['value']}, Counter: {result['counter']}")
+    # Item: 1, Counter: 101
+    # Item: 2, Counter: 102  
+    # Item: 3, Counter: 103
 ```
 
-### Context with Parallelism Control
+### Configuration and Dependencies
+
+Share configuration values and external dependencies:
 
 ```python
-from conveyor import single_task, Pipeline, PipelineContext
-
 @single_task
-async def cpu_intensive_task(item):
-    # Simulate CPU-intensive work
-    import asyncio
-    await asyncio.sleep(0.2)
-    return item ** 2
+async def process_with_config(item):
+    context = get_current_context()
+    
+    if context:
+        api_key = context.data.get('api_key', 'default')
+        timeout = context.data.get('timeout', 30)
+        # Use configuration in processing
+        return f"Processed {item} with key={api_key[:4]}..."
+    
+    return f"Processed {item} (no config)"
 
-pipeline = Pipeline()
-pipeline = pipeline.add(cpu_intensive_task)
-
-# Limit parallelism to avoid overwhelming the system
-context = PipelineContext(
-    execution_mode="as_completed",
-    max_parallelism=3  # Only run 3 tasks concurrently
+# Set up pipeline with configuration
+config_context = PipelineContext(
+    data={
+        'api_key': 'your-secret-key',
+        'timeout': 60,
+        'environment': 'production'
+    }
 )
 
-limited_pipeline = pipeline.with_context(**context.__dict__)
-
-# Process large dataset with controlled concurrency
-large_dataset = list(range(100))
-async for result in limited_pipeline(large_dataset):
-    print(f"Result: {result}")
+pipeline = process_with_config.with_context(**config_context.__dict__)
 ```
 
 ## Key Concepts
 
-- **PipelineContext**: Configuration object that controls pipeline execution behavior
-- **execution_mode**: Either "ordered" (preserves input order) or "as_completed" (results arrive as completed)
-- **data**: Dictionary for sharing custom data between tasks in the same pipeline execution
+- **PipelineContext.data**: Dictionary for sharing custom data between tasks in the same pipeline execution
 - **get_current_context()**: Function to access the current pipeline context from within tasks
 - **pipeline_id**: Unique identifier automatically assigned to each pipeline execution
-- **max_parallelism**: Optional limit on concurrent task execution
+- **Data persistence**: Context data persists and can be modified throughout the pipeline execution
+- **Task isolation**: Each pipeline execution gets its own context instance
