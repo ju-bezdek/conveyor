@@ -11,24 +11,20 @@ class PipelineContext:
     # Execution behavior
     execution_mode: ExecutionMode = "ordered"  # "ordered" or "as_completed"
     max_parallelism: Optional[int] = None  # None means unlimited
-    
+
     # Pipeline state
     pipeline_id: Optional[str] = None
-    stage_count: int = 0
-    current_stage: int = 0
-    
+
     # Custom data storage for sharing between tasks
     data: Dict[str, Any] = field(default_factory=dict)
-    
+
     def copy(self) -> 'PipelineContext':
         """Create a copy of the context."""
         return PipelineContext(
             execution_mode=self.execution_mode,
             max_parallelism=self.max_parallelism,
             pipeline_id=self.pipeline_id,
-            stage_count=self.stage_count,
-            current_stage=self.current_stage,
-            data=self.data.copy()
+            data=self.data.copy(),
         )
 
 # Context variable for thread-local pipeline context

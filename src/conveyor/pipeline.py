@@ -2,7 +2,7 @@ from re import U
 from typing import Any, AsyncIterable, Iterable, List, TypeVar, Union, Optional
 from .stream import AsyncStream
 from .tasks import BaseTask, UNDEFINED_VALUE
-from .context import PipelineContext, ContextManager, ExecutionMode
+from .context import PipelineContext, ContextManager, ExecutionMode, set_current_context
 import uuid
 
 T = TypeVar('T')
@@ -42,7 +42,6 @@ class Pipeline:
             return Pipeline(self.context.copy()).add(*self.stages).add(other)
         if isinstance(other, Pipeline): # Check against Pipeline class itself
             new_context = self.context.copy()
-            new_context.stage_count = len(self.stages) + len(other.stages)
             return Pipeline(new_context).add(*self.stages, *other.stages)
         raise TypeError(f"Cannot pipe Pipeline to {type(other)}")
 
@@ -84,14 +83,14 @@ class Pipeline:
             # Set up context for this pipeline execution
             execution_context = self.context.copy()
             execution_context.pipeline_id = str(uuid.uuid4())
-            execution_context.stage_count = len(self.stages)
 
             # Use the context manager for the entire pipeline execution
             with ContextManager(execution_context):
                 current_stream: AsyncIterable[Any] = self._make_input_async(data)
                 for stage_index, stage in enumerate(self.stages):
-                    # Update context for current stage
-                    execution_context.current_stage = stage_index
+                    # Update the context variable so tasks can see the current stage
+                    set_current_context(execution_context)
+
                     if stage_index == 0 and (args or kwargs):
                         # If there are kwargs, pass them to the first stage
                         if args:

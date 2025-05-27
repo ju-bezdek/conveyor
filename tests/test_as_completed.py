@@ -1,7 +1,17 @@
 import pytest
 import asyncio
 import time
-from conveyor import single_task, batch_task, Pipeline, PipelineContext, get_current_context
+import uuid
+from conveyor import (
+    single_task,
+    batch_task,
+    Pipeline,
+    PipelineContext,
+    get_current_context,
+    set_current_context,
+    ContextManager,
+    with_context,
+)
 from conveyor.stream import AsyncStream
 
 @single_task
@@ -208,16 +218,16 @@ async def test_pipeline_context_basic():
     async def context_aware_task(x: int) -> dict:
         context = get_current_context()
         return {
-            'value': x,
-            'pipeline_id': context.pipeline_id[:8] if context and context.pipeline_id else 'none',
-            'execution_mode': context.execution_mode if context else 'none',
-            'stage': context.current_stage if context else -1,
-            'total_stages': context.stage_count if context else -1
+            "value": x,
+            "pipeline_id": (
+                context.pipeline_id[:8] if context and context.pipeline_id else "none"
+            ),
+            "execution_mode": context.execution_mode if context else "none",
         }
-    
+
     pipeline = context_aware_task
     results = await pipeline([1, 2]).collect()
-    
+
     # Verify context is properly set
     for result in results:
         assert result['pipeline_id'] != 'none'
@@ -546,3 +556,224 @@ async def test_best_case_streaming():
 
     # Verify we got the correct first result
     assert results[0][0] == 0.1, f"Wrong first result: {results[0][0]}"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_context_creation_and_defaults():
+    """Test PipelineContext creation with default values."""
+    context = PipelineContext()
+
+    # Test default values
+    assert context.execution_mode == "ordered"
+    assert context.max_parallelism is None
+    assert context.pipeline_id is None
+    assert context.data == {}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_context_creation_with_values():
+    """Test PipelineContext creation with custom values."""
+    test_data = {"key1": "value1", "key2": 42}
+    context = PipelineContext(
+        execution_mode="as_completed",
+        max_parallelism=5,
+        pipeline_id="test-pipeline-123",
+        data=test_data,
+    )
+
+    # Test custom values
+    assert context.execution_mode == "as_completed"
+    assert context.max_parallelism == 5
+    assert context.pipeline_id == "test-pipeline-123"
+    assert context.data == test_data
+
+
+@pytest.mark.asyncio
+async def test_pipeline_context_copy():
+    """Test PipelineContext.copy() method."""
+    original_data = {"shared_counter": 10, "config": {"batch_size": 100}}
+    original = PipelineContext(
+        execution_mode="as_completed",
+        max_parallelism=10,
+        pipeline_id="original-123",
+        data=original_data,
+    )
+
+    # Create a copy
+    copy = original.copy()
+
+    # Verify all fields are copied correctly
+    assert copy.execution_mode == original.execution_mode
+    assert copy.max_parallelism == original.max_parallelism
+    assert copy.pipeline_id == original.pipeline_id
+    assert copy.data == original.data
+
+    # Verify deep copy behavior for data dictionary
+    assert copy.data is not original.data  # Different objects
+    copy.data["new_key"] = "new_value"
+    assert "new_key" not in original.data  # Original unchanged
+
+    # Verify modifying copy doesn't affect original
+    copy.execution_mode = "ordered"
+    copy.max_parallelism = 20
+    assert original.execution_mode == "as_completed"
+    assert original.max_parallelism == 10
+
+
+@pytest.mark.asyncio
+async def test_context_manager_basic():
+    """Test ContextManager basic functionality."""
+    # Ensure no context initially
+    assert get_current_context() is None
+
+    test_context = PipelineContext(pipeline_id="test-123", data={"test": "value"})
+
+    # Use context manager
+    with ContextManager(test_context) as ctx:
+        # Context should be set within the manager
+        assert get_current_context() is test_context
+        assert ctx is test_context
+        assert ctx.pipeline_id == "test-123"
+        assert ctx.data["test"] == "value"
+
+    # Context should be restored after exiting
+    assert get_current_context() is None
+
+
+@pytest.mark.asyncio
+async def test_context_manager_nested():
+    """Test nested ContextManager usage."""
+    # Start with no context
+    assert get_current_context() is None
+
+    context1 = PipelineContext(pipeline_id="context-1", data={"level": 1})
+    context2 = PipelineContext(pipeline_id="context-2", data={"level": 2})
+
+    with ContextManager(context1):
+        # First level
+        assert get_current_context() is context1
+        assert get_current_context().data["level"] == 1
+
+        with ContextManager(context2):
+            # Second level
+            assert get_current_context() is context2
+            assert get_current_context().data["level"] == 2
+
+        # Back to first level
+        assert get_current_context() is context1
+        assert get_current_context().data["level"] == 1
+
+    # Back to no context
+    assert get_current_context() is None
+
+
+@pytest.mark.asyncio
+async def test_context_manager_exception_handling():
+    """Test ContextManager properly restores context even when exceptions occur."""
+    original_context = PipelineContext(pipeline_id="original")
+
+    # Set initial context
+    with ContextManager(original_context):
+        assert get_current_context() is original_context
+
+        try:
+            new_context = PipelineContext(pipeline_id="new")
+            with ContextManager(new_context):
+                assert get_current_context() is new_context
+                raise ValueError("Test exception")
+        except ValueError:
+            # Context should be restored even after exception
+            assert get_current_context() is original_context
+
+    # Should be back to None
+    assert get_current_context() is None
+
+
+@pytest.mark.asyncio
+async def test_get_set_current_context():
+    """Test get_current_context and set_current_context functions."""
+    # Initially no context
+    assert get_current_context() is None
+
+    # Set a context
+    test_context = PipelineContext(pipeline_id="test-context", data={"key": "value"})
+    set_current_context(test_context)
+
+    # Verify it's set
+    current = get_current_context()
+    assert current is test_context
+    assert current.pipeline_id == "test-context"
+    assert current.data["key"] == "value"
+
+    # Set another context
+    another_context = PipelineContext(pipeline_id="another-context")
+    set_current_context(another_context)
+    assert get_current_context() is another_context
+
+    # Clear context
+    set_current_context(None)
+    assert get_current_context() is None
+
+
+@pytest.mark.asyncio
+async def test_with_context_function():
+    """Test with_context function for running coroutines with context."""
+    test_context = PipelineContext(
+        pipeline_id="async-test", data={"async_data": "test"}
+    )
+
+    async def test_coroutine():
+        # Should have access to the context
+        ctx = get_current_context()
+        assert ctx is not None
+        assert ctx.pipeline_id == "async-test"
+        assert ctx.data["async_data"] == "test"
+        return "success"
+
+    # Initially no context
+    assert get_current_context() is None
+
+    # Run coroutine with context
+    result = await with_context(test_context, test_coroutine())
+    assert result == "success"
+
+    # Context should be cleaned up
+    assert get_current_context() is None
+
+
+@pytest.mark.asyncio
+async def test_context_data_modification():
+    """Test modifying context data during pipeline execution."""
+
+    @single_task
+    async def modify_context_data(x: int) -> dict:
+        context = get_current_context()
+        if context:
+            # Read current value
+            current_sum = context.data.get("running_sum", 0)
+            # Modify context data
+            context.data["running_sum"] = current_sum + x
+            context.data["last_processed"] = x
+
+            return {
+                "value": x,
+                "running_sum": context.data["running_sum"],
+                "last_processed": context.data["last_processed"],
+            }
+        return {"value": x, "error": "no_context"}
+
+    # Create pipeline with initial context
+    pipeline = Pipeline().add(modify_context_data)
+    custom_pipeline = pipeline.with_context(data={"running_sum": 100})
+
+    results = await custom_pipeline([5, 10, 15]).collect()
+
+    # Verify context data was modified progressively
+    assert results[0]["running_sum"] == 105  # 100 + 5
+    assert results[1]["running_sum"] == 115  # 105 + 10
+    assert results[2]["running_sum"] == 130  # 115 + 15
+
+    # Verify last processed tracking
+    assert results[0]["last_processed"] == 5
+    assert results[1]["last_processed"] == 10
+    assert results[2]["last_processed"] == 15
